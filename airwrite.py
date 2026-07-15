@@ -4,34 +4,18 @@ import time
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
-from PIL import Image
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-import torch
+import easyocr
 
-# ══════════════════════════════════════════
 #  CAMERA: 0 = laptop, "http://x.x.x.x:8080/video" = phone
-# ══════════════════════════════════════════
-CAMERA_SOURCE = "http://192.168.0.103:8080/video"
+CAMERA_SOURCE = "http://192.168.0.108:8080/video"
 MODEL_PATH    = "hand_landmarker.task"
 
-# ════════════════════════════════
-#  TrOCR — Microsoft handwriting model
-#  Downloads ~1.5GB on first run
-#  then works completely offline
-# ════════════════════════════════
-print("Loading TrOCR handwriting model...")
-print("First run downloads ~1.5GB — please wait...")
-processor = TrOCRProcessor.from_pretrained(
-    'microsoft/trocr-base-handwritten',
-    local_files_only=False
-)
-trocr_model = VisionEncoderDecoderModel.from_pretrained(
-    'microsoft/trocr-base-handwritten'
-)
-trocr_model.eval()
-print("TrOCR ready")
+#  EasyOCR Setup
+print("Loading EasyOCR model...")
+reader = easyocr.Reader(['en'], gpu=False)  
+print("EasyOCR ready")
 
-# ── Colors ──
+#Colors
 WHITE  = (255, 255, 255)
 GREEN  = (0, 255, 120)
 YELLOW = (0, 220, 255)
@@ -39,24 +23,23 @@ GRAY   = (180, 180, 180)
 RED    = (0, 80, 255)
 ORANGE = (0, 165, 255)
 
-# ── State ──
-state     = "idle"
+# State
+state     = "writing"  
 last_word = ""
 submitted = []
 
-# ── Gesture hold ──
-last_gesture   = ""
+#Gesture hold
+last_command   = "none"
 gesture_frames = 0
-GESTURE_HOLD   = 20
+GESTURE_HOLD   = 15    
 
-# ── Drawing ──
+#Drawing
 latest_landmarks = None
 canvas   = None
 prev_x, prev_y = None, None
 
-# ════════════════════════════════
 #  MEDIAPIPE SETUP
-# ════════════════════════════════
+
 def on_result(result, output_image, timestamp_ms):
     global latest_landmarks
     latest_landmarks = result.hand_landmarks[0] if result.hand_landmarks else None
@@ -81,28 +64,30 @@ CONNECTIONS = [
     (0,17)
 ]
 
-# ════════════════════════════════
-#  GESTURE DETECTION
-# ════════════════════════════════
-def detect_gesture(lm):
+#  GESTURE LOGIC
+def is_pen_down(lm):
+    """ Simply checks the distance between thumb tip [4] and index tip [8] """
+    tx, ty = lm[4].x, lm[4].y
+    ix, iy = lm[8].x, lm[8].y
+    # 0.08 is a firm pinch. The moment they separate slightly, it returns False.
+    return ((tx-ix)**2 + (ty-iy)**2)**0.5 < 0.08
+
+def detect_command(lm):
+    """ Detects system commands (Peace/Palm) independent of drawing """
     tips      = [8, 12, 16, 20]
     pips      = [6, 10, 14, 18]
     extended  = [lm[tips[i]].y < lm[pips[i]].y for i in range(4)]
     thumb_out = lm[4].x < lm[3].x
-    if extended[0] and not extended[1] and not extended[2] and not extended[3]:
-        return "index_up"
-    if not any(extended):
-        return "fist"
+    
+    # Peace sign (Index and Middle open) -> Submit
     if extended[0] and extended[1] and not extended[2] and not extended[3]:
         return "peace"
+        
+    # High Five / Palm (All open) -> Clear canvas
     if all(extended) and thumb_out:
         return "palm"
+        
     return "none"
-
-def is_pen_down(lm):
-    tx, ty = lm[4].x, lm[4].y
-    ix, iy = lm[8].x, lm[8].y
-    return ((tx-ix)**2 + (ty-iy)**2)**0.5 < 0.12
 
 def draw_hand(frame, lm, w, h):
     pts = [(int(l.x * w), int(l.y * h)) for l in lm]
@@ -111,132 +96,87 @@ def draw_hand(frame, lm, w, h):
     for x, y in pts:
         cv2.circle(frame, (x, y), 3, GREEN, -1)
 
-# ════════════════════════════════
-#  TrOCR WORD CLASSIFIER
-#  Reads the whole word at once
-# ════════════════════════════════
-def preprocess_for_trocr(canvas):
-    """
-    Crop to written area, invert to white bg,
-    resize to TrOCR expected format
-    """
+#  IMAGE PREPROCESSOR
+
+def preprocess_canvas(canvas):
     gray_check = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
     if cv2.countNonZero(gray_check) < 100:
         return None
 
-    # Find written area
     coords = cv2.findNonZero(gray_check)
     if coords is None:
         return None
     x, y, bw, bh = cv2.boundingRect(coords)
 
-    # Add padding
-    pad = 30
-    x1  = max(0, x - pad)
-    y1  = max(0, y - pad)
-    x2  = min(canvas.shape[1], x + bw + pad)
-    y2  = min(canvas.shape[0], y + bh + pad)
-    cropped = canvas[y1:y2, x1:x2]
-
-    # Invert — white background, black text
+    cropped = canvas[y:y+bh, x:x+bw]
     inverted = cv2.bitwise_not(cropped)
 
-    # Scale up to minimum height TrOCR works well with
-    h_crop, w_crop = inverted.shape[:2]
-    target_h = 64
-    if h_crop < target_h:
-        scale    = target_h / h_crop
-        new_w    = int(w_crop * scale)
-        inverted = cv2.resize(inverted, (new_w, target_h),
-                              interpolation=cv2.INTER_LINEAR)
+    target_h = 100
+    scale = target_h / bh
+    target_w = int(bw * scale)
+    resized = cv2.resize(inverted, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
 
-    # Convert to PIL RGB (TrOCR requires RGB)
-    pil_img = Image.fromarray(
-        cv2.cvtColor(inverted, cv2.COLOR_BGR2RGB)
+    padding = 30
+    padded = cv2.copyMakeBorder(
+        resized, 
+        padding, padding, padding, padding, 
+        cv2.BORDER_CONSTANT, 
+        value=(255, 255, 255)
     )
-    return pil_img
+    return padded
 
+#  EASYOCR WORD RECOGNIZER
 
 def classify_word():
-    pil_img = preprocess_for_trocr(canvas)
-    if pil_img is None:
+    img_np = preprocess_canvas(canvas)
+    if img_np is None:
         print("Canvas empty — write something first")
         return "?"
 
-    # Show preview
-    preview_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    preview    = cv2.resize(preview_np, (400, 100),
-                            interpolation=cv2.INTER_AREA)
-    cv2.imshow("TrOCR sees this", preview)
+    h_preview, w_preview = img_np.shape[:2]
+    preview_scale = 150.0 / h_preview
+    preview_w = int(w_preview * preview_scale)
+    preview = cv2.resize(img_np, (preview_w, 150), interpolation=cv2.INTER_AREA)
+    cv2.imshow("EasyOCR sees this", preview)
 
-    # Run TrOCR inference
     try:
-        pixel_values = processor(
-            images=pil_img,
-            return_tensors="pt"
-        ).pixel_values
-
-        with torch.no_grad():
-            generated = trocr_model.generate(
-                pixel_values,
-                max_new_tokens=30
-            )
-
-        word = processor.batch_decode(
-            generated,
-            skip_special_tokens=True
-        )[0]
-
-        word = word.upper().strip()
-        word = ''.join(c for c in word
-                       if c.isalpha() or c == ' ').strip()
-
-        if word:
-            print(f"TrOCR recognized: {word}")
-            return word
-        else:
-            print("TrOCR returned empty — write larger")
+        results = reader.readtext(img_np, detail=0)
+        if not results:
             return "?"
 
+        word = ' '.join(results).upper().strip()
+        word = ''.join(c for c in word if c.isalpha() or c == ' ').strip()
+
+        if word:
+            return word
+        return "?"
     except Exception as e:
-        print(f"TrOCR error: {e}")
+        print(f"EasyOCR error: {e}")
         return "?"
 
-# ════════════════════════════════
 #  HUD DISPLAY
-# ════════════════════════════════
-def draw_hud(frame, gesture, pen_down):
+
+def draw_hud(frame, pen_down):
     h, w = frame.shape[:2]
 
     # Top bar
     cv2.rectangle(frame, (0, 0), (w, 55), (20, 20, 20), -1)
-    state_colors = {
-        "idle":        GRAY,
-        "drawing":     GREEN,
-        "recognizing": ORANGE
-    }
-    cv2.putText(frame, f"State: {state.upper()}",
-                (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                state_colors.get(state, GRAY), 2)
+    state_color = GREEN if state == "writing" else ORANGE
+    cv2.putText(frame, f"Mode: {state.upper()}",
+                (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, state_color, 2)
+                
     pen_color = RED if pen_down else GRAY
-    cv2.putText(frame,
-                "PEN DOWN — writing" if pen_down else "PEN UP — move freely",
-                (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, pen_color, 1)
-    cv2.putText(frame, f"Gesture: {gesture}",
-                (w-230, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, GRAY, 1)
-    if state == "drawing":
-        cv2.putText(frame, "PEACE = recognize word",
-                    (w-265, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.45, YELLOW, 1)
+    pen_text = "PEN DOWN (Drawing...)" if pen_down else "PEN UP (Hovering)"
+    cv2.putText(frame, pen_text, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, pen_color, 1)
 
     # Bottom bar
     cv2.rectangle(frame, (0, h-115), (w, h), (20, 20, 20), -1)
     hints = {
-        "idle":        "Raise INDEX finger to start writing",
-        "drawing":     "THUMB+INDEX=write  |  LIFT=move  |  PEACE=recognize  |  PALM=cancel",
-        "recognizing": "TrOCR reading your handwriting — please wait...",
+        "writing":     "PINCH = Draw  |  RELEASE PINCH = Lift  |  PEACE = Read  |  PALM = Clear",
+        "recognizing": "EasyOCR reading your handwriting — please wait...",
     }
     cv2.putText(frame, hints.get(state, ""),
-                (10, h-95), cv2.FONT_HERSHEY_SIMPLEX, 0.38, GRAY, 1)
+                (10, h-95), cv2.FONT_HERSHEY_SIMPLEX, 0.45, YELLOW, 1)
 
     display = last_word if last_word else "___"
     cv2.putText(frame, f"Word:  {display}",
@@ -246,29 +186,24 @@ def draw_hud(frame, gesture, pen_down):
         cv2.putText(frame, f"History: {' | '.join(submitted[-4:])}",
                     (10, h-12), cv2.FONT_HERSHEY_SIMPLEX, 0.48, GRAY, 1)
 
-# ════════════════════════════════
 #  MAIN LOOP
-# ════════════════════════════════
+
 cap = cv2.VideoCapture(CAMERA_SOURCE)
 frame_ts = 0
 
 print("═══════════════════════════════════════════════")
-print("  AirPen — Whole Word Recognition via TrOCR")
+print("  AirPen — Natural Pinch & Write")
 print("═══════════════════════════════════════════════")
-print("  1. INDEX up     → enter writing mode")
-print("  2. THUMB+INDEX  → pen down, write word")
-print("  3. LIFT THUMB   → pen up, reposition")
-print("  4. PEACE sign ✌ → TrOCR reads whole word")
-print("  5. PALM         → clear, start over")
-print("  C key = clear  |  ESC = quit")
-print("  TIP: Write BIG, CLEAR, connected letters")
-print("  NOTE: Recognition takes 1-3 sec on CPU")
+print("  🤏  PINCH FINGERS  → Pen down, draw")
+print("  👋  RELAX FINGERS  → Pen up, move freely")
+print("  ✌️  PEACE SIGN     → Read word")
+print("  🖐️  FLAT PALM      → Clear canvas")
+print("  ESC = quit")
 print("═══════════════════════════════════════════════")
 
 while True:
     ret, frame = cap.read()
     if not ret:
-        print("Cannot read camera — check CAMERA_SOURCE")
         break
 
     frame = cv2.flip(frame, 1)
@@ -276,75 +211,69 @@ while True:
 
     if canvas is None:
         canvas = np.zeros((h, w, 3), dtype=np.uint8)
-        print(f"Canvas ready: {w}x{h}")
 
     rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
     frame_ts += 1
     detector.detect_async(mp_image, frame_ts)
 
-    gesture  = "none"
     pen_down = False
+    command  = "none"
     lm       = latest_landmarks
 
     if lm:
         draw_hand(frame, lm, w, h)
+        
+        # Track the index finger tip to draw
         tip_x = int(lm[8].x * w)
         tip_y = int(lm[8].y * h)
 
-        gesture  = detect_gesture(lm)
+        # 1. Determine natural drawing state (Instant response)
         pen_down = is_pen_down(lm)
-
-        if gesture == last_gesture:
+        
+        # 2. Determine command state (Requires a brief hold to prevent accidents)
+        command = detect_command(lm)
+        if command == last_command and command != "none":
             gesture_frames += 1
         else:
-            last_gesture   = gesture
+            last_command   = command
             gesture_frames = 0
+            
         triggered = (gesture_frames == GESTURE_HOLD)
 
-        # ── STATE MACHINE ──
-        if state == "idle":
-            if triggered and gesture == "index_up":
-                state  = "drawing"
-                canvas = np.zeros((h, w, 3), dtype=np.uint8)
-                prev_x, prev_y = None, None
-                print("Writing mode — write full word then peace sign")
-
-        elif state == "drawing":
-            if gesture == "index_up":
-                if pen_down:
-                    if prev_x is not None:
-                        cv2.line(canvas,
-                                 (prev_x, prev_y),
-                                 (tip_x, tip_y),
-                                 WHITE, 20)
-                    prev_x, prev_y = tip_x, tip_y
-                else:
-                    prev_x, prev_y = None, None
-            else:
-                prev_x, prev_y = None, None
-
-            # Peace = recognize whole word
-            if triggered and gesture == "peace":
+        # STATE MACHINE
+        if state == "writing":
+            
+            if triggered and command == "peace":
                 state = "recognizing"
                 print("Recognizing — hold still...")
-
-            # Palm = clear
-            if triggered and gesture == "palm":
+                
+            elif triggered and command == "palm":
                 canvas = np.zeros((h, w, 3), dtype=np.uint8)
-                state  = "idle"
                 prev_x, prev_y = None, None
                 print("Cleared")
+                
+            else:
+                # Drawing happens entirely naturally based on the pinch distance!
+                if pen_down:
+                    if prev_x is not None:
+                        cv2.line(canvas, (prev_x, prev_y), (tip_x, tip_y), WHITE, 20)
+                    prev_x, prev_y = tip_x, tip_y
+                else:
+                    # The absolute instant you stop pinching, the line breaks.
+                    prev_x, prev_y = None, None
 
-        dot_color = RED if pen_down else GREEN
-        cv2.circle(frame, (tip_x, tip_y), 10, dot_color, -1)
-        cv2.circle(frame, (tip_x, tip_y), 10, WHITE, 1)
+        # Draw the cursor: Red dot when writing, hollow white circle when hovering
+        if pen_down:
+            cv2.circle(frame, (tip_x, tip_y), 10, RED, -1)
+        else:
+            cv2.circle(frame, (tip_x, tip_y), 10, WHITE, 2)
 
-    # ── RECOGNITION ──
+    # RECOGNITION
     if state == "recognizing":
         combined = cv2.addWeighted(frame, 0.75, canvas, 0.25, 0)
-        draw_hud(combined, gesture, pen_down)
-        cv2.imshow("AirPen - TrOCR Word Recognition", combined)
+        draw_hud(combined, pen_down)
+        cv2.imshow("AirPen", combined)
         cv2.waitKey(1)
 
         word = classify_word()
@@ -355,26 +284,25 @@ while True:
         else:
             last_word = "unclear — write bigger"
 
+        # Auto-reset back to writing mode
         canvas = np.zeros((h, w, 3), dtype=np.uint8)
-        state  = "idle"
+        state  = "writing"
         prev_x, prev_y = None, None
         continue
 
+    # Standard loop rendering
     combined = cv2.addWeighted(frame, 0.75, canvas, 0.25, 0)
-    draw_hud(combined, gesture, pen_down)
-    cv2.imshow("AirPen - TrOCR Word Recognition", combined)
+    draw_hud(combined, pen_down)
+    cv2.imshow("AirPen", combined)
 
     key = cv2.waitKey(1) & 0xFF
-    if key == 27:
+    if key == 27:   # ESC
         break
     if key == ord('c'):
         canvas    = np.zeros((h, w, 3), dtype=np.uint8)
-        state     = "idle"
         last_word = ""
         prev_x, prev_y = None, None
-        print("Cleared")
 
 detector.close()
 cap.release()
 cv2.destroyAllWindows()
-print("AirPen closed.")

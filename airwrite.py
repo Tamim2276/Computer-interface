@@ -6,20 +6,16 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
 import easyocr
 
-# ══════════════════════════════════════════
 #  CAMERA: 0 = laptop, "http://x.x.x.x:8080/video" = phone
-# ══════════════════════════════════════════
-CAMERA_SOURCE =  "http://192.168.0.101:8080/video"  # Changed to 0 for quick testing, update to your phone IP if needed
+CAMERA_SOURCE = "http://192.168.0.108:8080/video"
 MODEL_PATH    = "hand_landmarker.task"
 
-# ════════════════════════════════
-#  EASYOCR
-# ════════════════════════════════
-print("Loading EasyOCR model — please wait...")
-reader = easyocr.Reader(['en'], gpu=False)
+#  EasyOCR Setup
+print("Loading EasyOCR model...")
+reader = easyocr.Reader(['en'], gpu=False)  
 print("EasyOCR ready")
 
-# ── Colors ──
+#Colors
 WHITE  = (255, 255, 255)
 GREEN  = (0, 255, 120)
 YELLOW = (0, 220, 255)
@@ -27,23 +23,23 @@ GRAY   = (180, 180, 180)
 RED    = (0, 80, 255)
 ORANGE = (0, 165, 255)
 
-# ── State ──
+# State
+state     = "writing"  
 last_word = ""
 submitted = []
 
-# ── Gesture hold ──
-last_gesture   = ""
+#Gesture hold
+last_command   = "none"
 gesture_frames = 0
-GESTURE_HOLD   = 15  # Lowered from 20 for faster response
+GESTURE_HOLD   = 15    
 
-# ── Drawing ──
+#Drawing
 latest_landmarks = None
 canvas   = None
 prev_x, prev_y = None, None
 
-# ════════════════════════════════
 #  MEDIAPIPE SETUP
-# ════════════════════════════════
+
 def on_result(result, output_image, timestamp_ms):
     global latest_landmarks
     latest_landmarks = result.hand_landmarks[0] if result.hand_landmarks else None
@@ -68,33 +64,29 @@ CONNECTIONS = [
     (0,17)
 ]
 
-# ════════════════════════════════
-#  GESTURE DETECTION (Simplified & Improved)
-# ════════════════════════════════
-def get_pinch_midpoint(lm, w, h):
-    # Returns the midpoint between thumb and index for smoother drawing
-    mx = int((lm[4].x + lm[8].x) / 2 * w)
-    my = int((lm[4].y + lm[8].y) / 2 * h)
-    return mx, my
+#  GESTURE LOGIC
+def is_pen_down(lm):
+    """ Simply checks the distance between thumb tip [4] and index tip [8] """
+    tx, ty = lm[4].x, lm[4].y
+    ix, iy = lm[8].x, lm[8].y
+    # 0.08 is a firm pinch. The moment they separate slightly, it returns False.
+    return ((tx-ix)**2 + (ty-iy)**2)**0.5 < 0.08
 
-def detect_gesture(lm):
-    # 1. Check if pinched (distance between thumb and index tip)
-    pinch_dist = ((lm[4].x - lm[8].x)**2 + (lm[4].y - lm[8].y)**2)**0.5
-    if pinch_dist < 0.07:  # Tighter threshold for intentional writing
-        return "write"
+def detect_command(lm):
+    """ Detects system commands (Peace/Palm) independent of drawing """
+    tips      = [8, 12, 16, 20]
+    pips      = [6, 10, 14, 18]
+    extended  = [lm[tips[i]].y < lm[pips[i]].y for i in range(4)]
+    thumb_out = lm[4].x < lm[3].x
     
-    # 2. Check extended fingers for commands
-    tips = [8, 12, 16, 20]
-    pips = [6, 10, 14, 18]
-    ext = [lm[tips[i]].y < lm[pips[i]].y for i in range(4)]
-    
-    if ext[0] and not ext[1] and not ext[2] and not ext[3]:
-        return "hover"  # Only index up -> move without drawing
-    if ext[0] and ext[1] and not ext[2] and not ext[3]:
-        return "peace"  # Index + Middle -> submit/recognize
-    if all(ext):
-        return "palm"   # All fingers up -> clear canvas
-    
+    # Peace sign (Index and Middle open) -> Submit
+    if extended[0] and extended[1] and not extended[2] and not extended[3]:
+        return "peace"
+        
+    # High Five / Palm (All open) -> Clear canvas
+    if all(extended) and thumb_out:
+        return "palm"
+        
     return "none"
 
 def draw_hand(frame, lm, w, h):
@@ -104,103 +96,110 @@ def draw_hand(frame, lm, w, h):
     for x, y in pts:
         cv2.circle(frame, (x, y), 3, GREEN, -1)
 
-# ════════════════════════════════
-#  EASYOCR WITH IMPROVED PRE-PROCESSING
-# ════════════════════════════════
-def classify_word():
+#  IMAGE PREPROCESSOR
+
+def preprocess_canvas(canvas):
     gray_check = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
     if cv2.countNonZero(gray_check) < 100:
-        return "?"
+        return None
 
-    # 1. Invert (Black text on White background)
-    inverted = cv2.bitwise_not(canvas)
-    gray = cv2.cvtColor(inverted, cv2.COLOR_BGR2GRAY)
-    
-    # 2. Find bounding box of drawing
     coords = cv2.findNonZero(gray_check)
     if coords is None:
-        return "?"
+        return None
     x, y, bw, bh = cv2.boundingRect(coords)
-    
-    # 3. Add GENEROUS padding (EasyOCR needs whitespace to recognize edges)
-    pad = 50
-    x1 = max(0, x - pad)
-    y1 = max(0, y - pad)
-    x2 = min(canvas.shape[1], x + bw + pad)
-    y2 = min(canvas.shape[0], y + bh + pad)
-    cropped = inverted[y1:y2, x1:x2]
 
-    # 4. Scale up
-    scale = max(1, 400 // max(cropped.shape[0], cropped.shape[1]))
-    scaled = cv2.resize(cropped, (cropped.shape[1]*scale, cropped.shape[0]*scale), interpolation=cv2.INTER_CUBIC)
+    cropped = canvas[y:y+bh, x:x+bw]
+    inverted = cv2.bitwise_not(cropped)
 
-    # 5. Morphological Smoothing (Thickens and connects broken lines)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    processed = cv2.erode(scaled, kernel, iterations=1)
-    processed = cv2.GaussianBlur(processed, (5, 5), 0)
+    target_h = 100
+    scale = target_h / bh
+    target_w = int(bw * scale)
+    resized = cv2.resize(inverted, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
 
-    # Show preview of enhanced image
-    preview = cv2.resize(processed, (300, 150), interpolation=cv2.INTER_AREA)
+    padding = 30
+    padded = cv2.copyMakeBorder(
+        resized, 
+        padding, padding, padding, padding, 
+        cv2.BORDER_CONSTANT, 
+        value=(255, 255, 255)
+    )
+    return padded
+
+#  EASYOCR WORD RECOGNIZER
+
+def classify_word():
+    img_np = preprocess_canvas(canvas)
+    if img_np is None:
+        print("Canvas empty — write something first")
+        return "?"
+
+    h_preview, w_preview = img_np.shape[:2]
+    preview_scale = 150.0 / h_preview
+    preview_w = int(w_preview * preview_scale)
+    preview = cv2.resize(img_np, (preview_w, 150), interpolation=cv2.INTER_AREA)
     cv2.imshow("EasyOCR sees this", preview)
 
-    # 6. Run EasyOCR
-    # Removed paragraph=True, added allowlist to stop it from guessing numbers/symbols
-    result = reader.readtext(
-        processed, 
-        detail=0, 
-        allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
-    )
-    
-    print(f"Raw OCR Output: {result}") # This will help debug if it misreads
+    try:
+        results = reader.readtext(img_np, detail=0)
+        if not results:
+            return "?"
 
-    if result:
-        # Join the list into a single string and uppercase it
-        word = ' '.join(result).upper().strip()
+        word = ' '.join(results).upper().strip()
+        word = ''.join(c for c in word if c.isalpha() or c == ' ').strip()
+
         if word:
             return word
-            
-    return "?"
+        return "?"
+    except Exception as e:
+        print(f"EasyOCR error: {e}")
+        return "?"
 
-# ════════════════════════════════
 #  HUD DISPLAY
-# ════════════════════════════════
-def draw_hud(frame, gesture):
+
+def draw_hud(frame, pen_down):
     h, w = frame.shape[:2]
 
     # Top bar
     cv2.rectangle(frame, (0, 0), (w, 55), (20, 20, 20), -1)
-    
-    status_text = "WRITING" if gesture == "write" else ("HOVERING" if gesture == "hover" else "WAITING")
-    status_color = RED if gesture == "write" else (GREEN if gesture == "hover" else GRAY)
-    
-    cv2.putText(frame, f"Mode: {status_text}", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
-    cv2.putText(frame, f"Gesture: {gesture}", (w-200, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, GRAY, 1)
+    state_color = GREEN if state == "writing" else ORANGE
+    cv2.putText(frame, f"Mode: {state.upper()}",
+                (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, state_color, 2)
+                
+    pen_color = RED if pen_down else GRAY
+    pen_text = "PEN DOWN (Drawing...)" if pen_down else "PEN UP (Hovering)"
+    cv2.putText(frame, pen_text, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, pen_color, 1)
 
     # Bottom bar
     cv2.rectangle(frame, (0, h-115), (w, h), (20, 20, 20), -1)
-    hints = "PINCH to write | UN-PINCH to hover | PEACE to read | PALM to clear"
-    cv2.putText(frame, hints, (10, h-95), cv2.FONT_HERSHEY_SIMPLEX, 0.45, YELLOW, 1)
+    hints = {
+        "writing":     "PINCH = Draw  |  RELEASE PINCH = Lift  |  PEACE = Read  |  PALM = Clear",
+        "recognizing": "EasyOCR reading your handwriting — please wait...",
+    }
+    cv2.putText(frame, hints.get(state, ""),
+                (10, h-95), cv2.FONT_HERSHEY_SIMPLEX, 0.45, YELLOW, 1)
 
     display = last_word if last_word else "___"
-    cv2.putText(frame, f"Word:  {display}", (10, h-45), cv2.FONT_HERSHEY_SIMPLEX, 1.3, GREEN, 2)
+    cv2.putText(frame, f"Word:  {display}",
+                (10, h-55), cv2.FONT_HERSHEY_SIMPLEX, 1.3, GREEN, 2)
 
     if submitted:
-        cv2.putText(frame, f"History: {' | '.join(submitted[-4:])}", (10, h-15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, GRAY, 1)
+        cv2.putText(frame, f"History: {' | '.join(submitted[-4:])}",
+                    (10, h-12), cv2.FONT_HERSHEY_SIMPLEX, 0.48, GRAY, 1)
 
-# ════════════════════════════════
 #  MAIN LOOP
-# ════════════════════════════════
+
 cap = cv2.VideoCapture(CAMERA_SOURCE)
 frame_ts = 0
 
-print("\n═══════════════════════════════════════════")
-print("  AirPen — Improved Edition")
-print("═══════════════════════════════════════════")
-print("  1. PINCH fingers   → Pen down, draw")
-print("  2. UN-PINCH (Index)→ Pen up, hover/move")
-print("  3. PEACE sign ✌    → Recognize word")
-print("  4. PALM            → Clear canvas")
-print("═══════════════════════════════════════════\n")
+print("═══════════════════════════════════════════════")
+print("  AirPen — Natural Pinch & Write")
+print("═══════════════════════════════════════════════")
+print("  🤏  PINCH FINGERS  → Pen down, draw")
+print("  👋  RELAX FINGERS  → Pen up, move freely")
+print("  ✌️  PEACE SIGN     → Read word")
+print("  🖐️  FLAT PALM      → Clear canvas")
+print("  ESC = quit")
+print("═══════════════════════════════════════════════")
 
 while True:
     ret, frame = cap.read()
@@ -218,73 +217,91 @@ while True:
     frame_ts += 1
     detector.detect_async(mp_image, frame_ts)
 
-    gesture = "none"
-    lm      = latest_landmarks
+    pen_down = False
+    command  = "none"
+    lm       = latest_landmarks
 
     if lm:
         draw_hand(frame, lm, w, h)
-        gesture = detect_gesture(lm)
         
-        # Get midpoint of pinch for smoother drawing cursor
-        cursor_x, cursor_y = get_pinch_midpoint(lm, w, h)
+        # Track the index finger tip to draw
+        tip_x = int(lm[8].x * w)
+        tip_y = int(lm[8].y * h)
 
-        # Trigger logic for commands
-        if gesture == last_gesture and gesture in ["peace", "palm"]:
+        # 1. Determine natural drawing state (Instant response)
+        pen_down = is_pen_down(lm)
+        
+        # 2. Determine command state (Requires a brief hold to prevent accidents)
+        command = detect_command(lm)
+        if command == last_command and command != "none":
             gesture_frames += 1
         else:
-            last_gesture   = gesture
+            last_command   = command
             gesture_frames = 0
             
         triggered = (gesture_frames == GESTURE_HOLD)
 
-        # ── DRAWING LOGIC ──
-        if gesture == "write":
-            if prev_x is not None:
-                # Anti-aliased, thicker lines for better OCR reading
-                cv2.line(canvas, (prev_x, prev_y), (cursor_x, cursor_y), WHITE, 25, cv2.LINE_AA)
-            prev_x, prev_y = cursor_x, cursor_y
-        else:
-            prev_x, prev_y = None, None
-
-        # ── COMMAND LOGIC ──
-        if triggered and gesture == "peace":
-            # Show processing state briefly
-            cv2.putText(frame, "READING...", (w//2 - 100, h//2), cv2.FONT_HERSHEY_SIMPLEX, 1.5, ORANGE, 3)
-            cv2.imshow("AirPen", frame)
-            cv2.waitKey(1)
+        # STATE MACHINE
+        if state == "writing":
             
-            word = classify_word()
-            if word != "?":
-                last_word = word
-                submitted.append(word)
-                print(f"Recognized: {word}")
-            else:
-                last_word = "unclear — write bigger"
+            if triggered and command == "peace":
+                state = "recognizing"
+                print("Recognizing — hold still...")
                 
-            canvas = np.zeros((h, w, 3), dtype=np.uint8)
-            gesture_frames = 0
+            elif triggered and command == "palm":
+                canvas = np.zeros((h, w, 3), dtype=np.uint8)
+                prev_x, prev_y = None, None
+                print("Cleared")
+                
+            else:
+                # Drawing happens entirely naturally based on the pinch distance!
+                if pen_down:
+                    if prev_x is not None:
+                        cv2.line(canvas, (prev_x, prev_y), (tip_x, tip_y), WHITE, 20)
+                    prev_x, prev_y = tip_x, tip_y
+                else:
+                    # The absolute instant you stop pinching, the line breaks.
+                    prev_x, prev_y = None, None
 
-        if triggered and gesture == "palm":
-            canvas = np.zeros((h, w, 3), dtype=np.uint8)
-            last_word = ""
-            gesture_frames = 0
-            print("Canvas Cleared")
+        # Draw the cursor: Red dot when writing, hollow white circle when hovering
+        if pen_down:
+            cv2.circle(frame, (tip_x, tip_y), 10, RED, -1)
+        else:
+            cv2.circle(frame, (tip_x, tip_y), 10, WHITE, 2)
 
-        # Draw Cursor
-        dot_color = RED if gesture == "write" else GREEN
-        cv2.circle(frame, (cursor_x, cursor_y), 8, dot_color, -1)
-        cv2.circle(frame, (cursor_x, cursor_y), 8, WHITE, 2)
+    # RECOGNITION
+    if state == "recognizing":
+        combined = cv2.addWeighted(frame, 0.75, canvas, 0.25, 0)
+        draw_hud(combined, pen_down)
+        cv2.imshow("AirPen", combined)
+        cv2.waitKey(1)
 
-    # Combine canvas and camera
+        word = classify_word()
+        if word != "?":
+            last_word = word
+            submitted.append(word)
+            print(f"Result: {word}")
+        else:
+            last_word = "unclear — write bigger"
+
+        # Auto-reset back to writing mode
+        canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        state  = "writing"
+        prev_x, prev_y = None, None
+        continue
+
+    # Standard loop rendering
     combined = cv2.addWeighted(frame, 0.75, canvas, 0.25, 0)
-    draw_hud(combined, gesture)
+    draw_hud(combined, pen_down)
     cv2.imshow("AirPen", combined)
 
     key = cv2.waitKey(1) & 0xFF
-    if key == 27: # ESC
+    if key == 27:   # ESC
         break
     if key == ord('c'):
-        canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        canvas    = np.zeros((h, w, 3), dtype=np.uint8)
+        last_word = ""
+        prev_x, prev_y = None, None
 
 detector.close()
 cap.release()

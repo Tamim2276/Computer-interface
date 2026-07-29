@@ -22,16 +22,25 @@ warnings.filterwarnings(
 import cv2
 import mediapipe as mp
 import numpy as np
-import torch
-from PIL import Image
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python.vision import (
     HandLandmarker,
     HandLandmarkerOptions,
     RunningMode,
 )
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-from transformers.utils import logging as transformers_logging
+
+# Set OCR_BACKEND=huggingface on the Pi to call the deployed cloud endpoint.
+# Local is retained for desktop development and offline testing.
+OCR_BACKEND = os.environ.get("OCR_BACKEND", "local").strip().lower()
+if OCR_BACKEND == "local":
+    import torch
+    from PIL import Image
+    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+    from transformers.utils import logging as transformers_logging
+elif OCR_BACKEND == "huggingface":
+    from ocr_client import OCRServiceError, recognize_image
+else:
+    raise ValueError("OCR_BACKEND must be 'local' or 'huggingface'.")
 
 # 0 = laptop webcam. Replace with an IP-camera URL if required.
 CAMERA_SOURCE = "http://192.168.0.100:8080/video"
@@ -58,14 +67,10 @@ CURSOR_HOVER_ALPHA = 0.90
 MAX_CURSOR_SPEED = 50_000  # Effectively no motion clamp during normal use.
 MAX_STROKE_SEGMENT = 320
 
-# Leave CPU capacity for the camera/UI while TrOCR is recognizing in the background.
-torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
-
 CAMERA_WINDOW = "AirPen Camera"
 CANVAS_WINDOW = "AirPen Canvas"
-PREVIEW_WINDOW = "TrOCR sees this"
+PREVIEW_WINDOW = "OCR sees this"
 TROCR_MODEL = "microsoft/trocr-base-handwritten"
-TROCR_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 WHITE = (255, 255, 255)
 GREEN = (0, 255, 120)
@@ -75,13 +80,18 @@ DARK_GRAY = (45, 45, 45)
 RED = (0, 80, 255)
 ORANGE = (0, 165, 255)
 
-print(f"Loading TrOCR model on {TROCR_DEVICE}...")
-print("The first run downloads the handwritten model and may take a few minutes.")
-transformers_logging.set_verbosity_error()
-processor = TrOCRProcessor.from_pretrained(TROCR_MODEL)
-trocr_model = VisionEncoderDecoderModel.from_pretrained(TROCR_MODEL).to(TROCR_DEVICE)
-trocr_model.eval()
-print("TrOCR ready")
+if OCR_BACKEND == "local":
+    # Leave CPU capacity for the camera/UI while local TrOCR is recognizing.
+    torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
+    TROCR_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading local TrOCR model on {TROCR_DEVICE}...")
+    transformers_logging.set_verbosity_error()
+    processor = TrOCRProcessor.from_pretrained(TROCR_MODEL)
+    trocr_model = VisionEncoderDecoderModel.from_pretrained(TROCR_MODEL).to(TROCR_DEVICE)
+    trocr_model.eval()
+    print("Local TrOCR ready")
+else:
+    print("Using Hugging Face OCR endpoint; no TrOCR model is loaded locally.")
 
 # Application state
 state = "ready"
@@ -285,13 +295,16 @@ def recognize_canvas_part(image):
     preview_width = max(1, int(image.shape[1] * 150 / image.shape[0]))
     preview = cv2.resize(image, (preview_width, 150), interpolation=cv2.INTER_AREA)
     try:
-        pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        pixel_values = processor(images=pil_image, return_tensors="pt").pixel_values.to(TROCR_DEVICE)
-        with torch.inference_mode():
-            generated_ids = trocr_model.generate(pixel_values, max_new_tokens=64)
-        text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        if OCR_BACKEND == "huggingface":
+            text = recognize_image(image)
+        else:
+            pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            pixel_values = processor(images=pil_image, return_tensors="pt").pixel_values.to(TROCR_DEVICE)
+            with torch.inference_mode():
+                generated_ids = trocr_model.generate(pixel_values, max_new_tokens=64)
+            text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     except Exception as error:
-        print(f"TrOCR error: {error}")
+        print(f"OCR error: {error}")
         return "?", preview
     # Normalize independent word reads so the final transcript never mixes
     # model-predicted upper- and lowercase letters.

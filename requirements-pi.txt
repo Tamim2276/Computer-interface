@@ -1,0 +1,6 @@
+# Raspberry Pi runtime for cloud OCR. It intentionally excludes PyTorch and
+# Transformers because OCR_BACKEND=huggingface sends handwriting to the API.
+mediapipe==0.10.35
+numpy==2.4.6
+opencv-contrib-python==4.13.0.92
+requests>=2.32,<3

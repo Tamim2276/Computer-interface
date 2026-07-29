@@ -37,6 +37,28 @@ On PowerShell, use:
 python airwrite.py
 ```
 
+## Raspberry Pi with Hugging Face OCR
+
+For the Pi, install the lightweight cloud-OCR runtime instead of the local TrOCR stack:
+
+```bash
+python3 -m venv airwrite_env
+source airwrite_env/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-pi.txt
+```
+
+Deploy the contents of `hf_endpoint/` as a Hugging Face Inference Endpoint custom container, with your TrOCR model repository selected as the endpoint model. Then configure the Pi without placing the token in source code:
+
+```bash
+export OCR_BACKEND=huggingface
+export HF_ENDPOINT_URL="https://YOUR_ENDPOINT_URL"
+export HF_TOKEN="hf_your_token"
+python airwrite.py
+```
+
+The application sends the cropped handwriting image to `POST /ocr`; the endpoint returns `{"text": "AIR PEN"}`. Local development remains available with `OCR_BACKEND=local`.
+
 ## Controls
 
 | Input | Action |

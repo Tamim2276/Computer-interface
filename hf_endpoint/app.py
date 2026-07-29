@@ -2,13 +2,15 @@
 
 import io
 import os
+import secrets
 
 import torch
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from PIL import Image
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
 MODEL_ID = os.environ.get("MODEL_ID", "microsoft/trocr-base-handwritten")
+API_KEY = os.environ.get("AIRWRITE_API_KEY", "")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 app = FastAPI(title="AirWrite OCR API")
@@ -23,7 +25,15 @@ def health():
 
 
 @app.post("/ocr")
-async def ocr(file: UploadFile = File(...)):
+async def ocr(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+):
+    expected_header = f"Bearer {API_KEY}"
+    if not API_KEY:
+        raise HTTPException(status_code=503, detail="OCR API key is not configured.")
+    if not authorization or not secrets.compare_digest(authorization, expected_header):
+        raise HTTPException(status_code=401, detail="Invalid API key.")
     if file.content_type not in {"image/jpeg", "image/png"}:
         raise HTTPException(status_code=415, detail="Upload a JPEG or PNG handwriting image.")
 

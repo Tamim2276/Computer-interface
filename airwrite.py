@@ -1,7 +1,27 @@
-import cv2
-import numpy as np
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+import os
+from pathlib import Path
 import time
+import warnings
+
+# Suppress known non-actionable third-party startup messages before MediaPipe loads.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("GLOG_minloglevel", "3")
+warnings.filterwarnings(
+    "ignore",
+    message=r"`torch\.utils\._pytree\._register_pytree_node` is deprecated.*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"`resume_download` is deprecated.*",
+    category=FutureWarning,
+)
+
+import cv2
 import mediapipe as mp
+import numpy as np
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions, RunningMode
 import easyocr
@@ -19,8 +39,9 @@ print("EasyOCR ready")
 WHITE  = (255, 255, 255)
 GREEN  = (0, 255, 120)
 YELLOW = (0, 220, 255)
-GRAY   = (180, 180, 180)
-RED    = (0, 80, 255)
+GRAY = (180, 180, 180)
+DARK_GRAY = (45, 45, 45)
+RED = (0, 80, 255)
 ORANGE = (0, 165, 255)
 
 # State
@@ -44,24 +65,25 @@ def on_result(result, output_image, timestamp_ms):
     global latest_landmarks
     latest_landmarks = result.hand_landmarks[0] if result.hand_landmarks else None
 
+
 options = HandLandmarkerOptions(
-    base_options=mp_python.BaseOptions(model_asset_path=MODEL_PATH),
+    base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
     running_mode=RunningMode.LIVE_STREAM,
     num_hands=1,
     min_hand_detection_confidence=0.7,
     min_hand_presence_confidence=0.7,
     min_tracking_confidence=0.6,
-    result_callback=on_result
+    result_callback=on_result,
 )
 detector = HandLandmarker.create_from_options(options)
 
 CONNECTIONS = [
-    (0,1),(1,2),(2,3),(3,4),
-    (0,5),(5,6),(6,7),(7,8),
-    (5,9),(9,10),(10,11),(11,12),
-    (9,13),(13,14),(14,15),(15,16),
-    (13,17),(17,18),(18,19),(19,20),
-    (0,17)
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12),
+    (9, 13), (13, 14), (14, 15), (15, 16),
+    (13, 17), (17, 18), (18, 19), (19, 20),
+    (0, 17),
 ]
 
 #  GESTURE LOGIC

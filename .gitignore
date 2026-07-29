@@ -1,2 +1,33 @@
+# Dataset and local environments
 emnist_data/
 airwrite_env/
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode and tooling caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Packaging and build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local configuration and editor files
+.env
+.env.*
+.vscode/
+.idea/
+
+# OS-generated files
+.DS_Store
+Thumbs.db

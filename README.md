@@ -1,49 +1,66 @@
-# For Version 3 Branch
+# AirPen
 
-# AirPen: Natural Hand-Tracking Word Recognition
-
-AirPen is a real-time computer vision application that turns your hand into a digital pen. Using your webcam, the software tracks your finger movements to draw on the air, allowing you to write words and have them automatically recognized using optical character recognition (OCR).
-
-## How It Works
-
-The project combines advanced computer vision, gesture-based state management, and machine learning to create a seamless drawing experience.
-
-### 1. The Engine (MediaPipe)
-
-We use the **MediaPipe Hand Landmarker** to track 21 distinct points on your hand. By monitoring the distance between the tip of your thumb and your index finger, the system determines exactly when your "pen" is touching the virtual canvas.
-
-### 2. Gesture Controls (Natural Interaction)
-
-We replaced clunky menu buttons with intuitive, natural hand gestures:
-
-- **Pinch (Thumb + Index):** Pen Down — draw as you move your index finger.
-- **Release:** Pen Up — hover and move your hand to start a new letter without drawing.
-- **Peace Sign (✌️):** Triggers the recognition engine to read what you have written.
-- **Fist (✊):** Clears the canvas entirely.
-
-### 3. Smart Processing (Pre-processing & OCR)
-
-To ensure high accuracy, the project uses a custom image-processing pipeline before text recognition:
-
-- **Normalization:** The application crops only the area where you have written, removing excess black space.
-- **Enhancement:** It inverts the colors (creating clean black text on a white background) and resizes the image while maintaining the original aspect ratio.
-- **Recognition:** The cleaned image is processed by **EasyOCR**, which converts your air-written strokes into digital text.
+AirPen is a real-time air-writing application. It tracks one hand with MediaPipe, turns an index-finger pose into strokes, and reads completed writing with TrOCR.
 
 ## Features
 
-- **Zero-Setup Interaction:** Start writing the moment the app launches.
-- **Smart Pen-Lift:** No accidental "tails" or streaks; the pen lifts the instant you stop pinching.
-- **Real-time HUD:** A clean dashboard shows your current mode, recognized word history, and clear instructions.
-- **Dynamic Preview:** See exactly what the AI sees in a dedicated preview window during recognition.
+- Two automatic windows: a small hand-tracking camera view at top-left and a wide 1600x900 virtual writing canvas on the right. The high-resolution canvas stays accurate when fullscreen and has room for a sentence.
+- Comfortable 1.35x fingertip motion (`AMPLIFY` in `airwrite.py`), adaptive cursor smoothing, anti-aliased strokes, and midpoint interpolation for smoother curves.
+- Short pen-state stability check to prevent flickering without delaying pinch-to-move.
+- Canvas-only writing guides, an amplified cursor dot, a live bounding-box preview, a fill bar that turns green when enough ink is present for OCR, and a prominent recognition-result banner.
+- Background TrOCR recognition, so the camera and UI continue updating while the model reads the canvas.
+- Two writing modes: sentence recognition for a full line, or deliberate peace-sign recognition for one word.
+- Index-only writing, pinch-to-reposition, peace-sign recognition, thumbs-up spacing, palm clear, and keyboard undo.
 
-## Tech Stack
+## Setup
 
-- **Python**
-- **OpenCV:** For real-time video streaming and image manipulation.
-- **MediaPipe:** For high-speed, accurate hand-joint tracking.
-- **EasyOCR:** For state-of-the-art text recognition.
-- **NumPy:** For canvas and matrix calculations.
+1. Keep `hand_landmarker.task` beside `airwrite.py`.
+2. In `airwrite.py`, set `CAMERA_SOURCE` to `0` for the laptop webcam, or set it to the URL of an IP camera stream.
+3. Install the dependencies into a virtual environment.
 
----
+```bash
+python -m venv airwrite_env
+```
 
-_Created as a lightweight, efficient computer vision project for real-time gesture-based interaction._
+In Git Bash, activate it with (there is no leading `p`):
+
+```bash
+source airwrite_env/Scripts/activate
+python -m pip install -r requirements.txt
+python airwrite.py
+```
+
+On PowerShell, use:
+
+```powershell
+.\airwrite_env\Scripts\Activate.ps1
+python airwrite.py
+```
+
+## Controls
+
+| Input | Action |
+| --- | --- |
+| Index finger up, held about 0.6 seconds | Start writing mode |
+| Index finger only | Draw a stroke |
+| Pinch thumb and index | Lift the pen and reposition without drawing |
+| Peace sign, held briefly | Read the canvas with TrOCR |
+| Thumbs up, held briefly | In Word Mode, add a space after a recognized word |
+| Closed fist, held briefly on a blank canvas | Toggle Word Mode / Sentence Mode |
+| Open palm, held briefly | Clear the canvas |
+| `U` | Undo the last stroke |
+| `C` | Clear canvas and recognized text |
+| `Space` | Add a space after recognized text |
+| `F` | Toggle fullscreen canvas |
+| `Esc` | Quit |
+
+In **Word Mode**, write a word of any length, pinch to lift/reposition, then use peace to read it. AirPen clears the canvas and appends the result to the transcript. After the word is recognized, a thumbs-up adds its space. In **Sentence Mode**, write a complete line with physical gaps between words, then use peace once to read it. Use peace with an empty canvas to show the accumulated text. The first launch downloads Microsoft’s `trocr-base-handwritten` model (about 1.33 GB) and then caches it locally; later launches use the cached model.
+
+## Project files
+
+| File | Purpose |
+| --- | --- |
+| `airwrite.py` | Live camera, gesture, canvas, and TrOCR application |
+| `hand_landmarker.task` | MediaPipe hand-landmarker model |
+| `train_cnn.py` | Optional EMNIST CNN training script |
+| `requirements.txt` | Python dependencies |

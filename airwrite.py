@@ -29,6 +29,12 @@ from mediapipe.tasks.python.vision import (
     RunningMode,
 )
 
+INPUT_BACKEND = os.environ.get("INPUT_BACKEND", "camera").strip().lower()
+if INPUT_BACKEND not in {"camera", "glove"}:
+    raise ValueError("INPUT_BACKEND must be 'camera' or 'glove'.")
+if INPUT_BACKEND == "glove":
+    import glove_reader
+
 # Set OCR_BACKEND=huggingface on the Pi to call the deployed cloud endpoint.
 # Local is retained for desktop development and offline testing.
 OCR_BACKEND = os.environ.get("OCR_BACKEND", "local").strip().lower()
@@ -45,11 +51,17 @@ else:
 # 0 = laptop webcam. Replace with an IP-camera URL if required.
 CAMERA_SOURCE = "http://192.168.0.100:8080/video"
 MODEL_PATH = Path(__file__).with_name("hand_landmarker.task")
+GLOVE_SERIAL_PORT = os.environ.get("GLOVE_SERIAL_PORT", "COM3")
 
 # Drawing feel
 # A comfortable amount of amplification reduces arm movement while retaining
 # enough edge room for normal writing.
 AMPLIFY = 1.35
+# The camera's usable writing area is shifted upward. This maps the canvas
+# bottom to about 82% of the camera height, before the fingertip/hand begins to
+# leave the frame and MediaPipe tracking becomes unreliable.
+CAMERA_INPUT_CENTER_X = 0.50
+CAMERA_INPUT_CENTER_Y = 0.45
 STROKE_WIDTH = 20
 PEN_VOTE_FRAMES = 3
 GESTURE_HOLD = 18  # About 0.6 seconds at 30 FPS.
@@ -62,10 +74,11 @@ CANVAS_HEIGHT = 900
 MAX_UNDO_STEPS = 30
 RESULT_DISPLAY_SECONDS = 6.0
 # Light adaptive smoothing: stable when holding still, near-direct while moving.
-CURSOR_DRAW_ALPHA = 0.84
-CURSOR_HOVER_ALPHA = 0.90
-MAX_CURSOR_SPEED = 50_000  # Effectively no motion clamp during normal use.
-MAX_STROKE_SEGMENT = 320
+CURSOR_DRAW_ALPHA = 0.60
+CURSOR_HOVER_ALPHA = 0.72
+CURSOR_FAST_SPEED = 2_400.0
+MAX_CURSOR_SPEED = 9_000
+MAX_STROKE_SEGMENT = 220
 
 CAMERA_WINDOW = "AirPen Camera"
 CANVAS_WINDOW = "AirPen Canvas"
@@ -129,16 +142,18 @@ def on_result(result, output_image, timestamp_ms):
     latest_landmarks = result.hand_landmarks[0] if result.hand_landmarks else None
 
 
-options = HandLandmarkerOptions(
-    base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
-    running_mode=RunningMode.LIVE_STREAM,
-    num_hands=1,
-    min_hand_detection_confidence=0.7,
-    min_hand_presence_confidence=0.7,
-    min_tracking_confidence=0.6,
-    result_callback=on_result,
-)
-detector = HandLandmarker.create_from_options(options)
+detector = None
+if INPUT_BACKEND == "camera":
+    options = HandLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
+        running_mode=RunningMode.LIVE_STREAM,
+        num_hands=1,
+        min_hand_detection_confidence=0.7,
+        min_hand_presence_confidence=0.7,
+        min_tracking_confidence=0.6,
+        result_callback=on_result,
+    )
+    detector = HandLandmarker.create_from_options(options)
 
 CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -195,12 +210,11 @@ def is_start_gesture(landmarks):
 
 
 def amplified_point(landmarks, width, height):
-    """Map the index tip to canvas coordinates, amplifying about the frame centre."""
-    x = landmarks[8].x * (width - 1)
-    y = landmarks[8].y * (height - 1)
-    center_x, center_y = (width - 1) / 2, (height - 1) / 2
-    x = center_x + (x - center_x) * AMPLIFY
-    y = center_y + (y - center_y) * AMPLIFY
+    """Map the stable central camera region onto the complete canvas."""
+    normalized_x = 0.5 + (landmarks[8].x - CAMERA_INPUT_CENTER_X) * AMPLIFY
+    normalized_y = 0.5 + (landmarks[8].y - CAMERA_INPUT_CENTER_Y) * AMPLIFY
+    x = normalized_x * (width - 1)
+    y = normalized_y * (height - 1)
     return int(np.clip(x, 0, width - 1)), int(np.clip(y, 0, height - 1))
 
 
@@ -225,9 +239,11 @@ def stabilize_cursor(raw_point, drawing):
         dy *= max_distance / distance
 
     base_alpha = CURSOR_DRAW_ALPHA if drawing else CURSOR_HOVER_ALPHA
-    # Faster movement gets less filtering, so the cursor stays fluid rather
-    # than feeling like it is dragging behind the hand.
-    alpha = min(0.98, base_alpha + min(distance, 180.0) / 180.0 * 0.14)
+    # Slow letter-forming motion receives useful jitter filtering. Fast motion
+    # quickly approaches direct tracking, preventing the heavy/dragging feel.
+    speed = distance / elapsed
+    motion_ratio = min(1.0, speed / CURSOR_FAST_SPEED)
+    alpha = base_alpha + (0.97 - base_alpha) * motion_ratio
     filtered_cursor = (
         filtered_cursor[0] + alpha * dx,
         filtered_cursor[1] + alpha * dy,
@@ -422,7 +438,13 @@ def draw_canvas_overlay(image, cursor):
     if cursor is not None:
         cv2.circle(image, cursor, 7, RED if pen_down else WHITE, -1 if pen_down else 1, cv2.LINE_AA)
 
-    if state == "ready":
+    if INPUT_BACKEND == "glove" and state == "ready":
+        hint = f"Waiting for glove on {GLOVE_SERIAL_PORT} - move it in a figure-8"
+    elif INPUT_BACKEND == "glove" and state == "recognizing":
+        hint = "TrOCR is reading - keep the middle finger straight"
+    elif INPUT_BACKEND == "glove":
+        hint = "Glove: bend index to draw | bend middle to read | R: recenter | C: clear | U: undo"
+    elif state == "ready":
         hint = "Index up: start writing"
     elif state == "recognizing":
         hint = "TrOCR is reading — your camera and canvas remain live"
@@ -431,6 +453,18 @@ def draw_canvas_overlay(image, cursor):
     else:
         hint = "Word Mode: index writes | Pinch moves | Peace: read word | Thumbs up: space | Fist: sentence mode"
     cv2.putText(image, hint, (16, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.48, YELLOW, 1, cv2.LINE_AA)
+    if INPUT_BACKEND == "glove":
+        flex_index, flex_middle = glove_reader.get_flex()
+        cv2.putText(
+            image,
+            f"Port: {GLOVE_SERIAL_PORT} | Flex index: {flex_index} | middle: {flex_middle}",
+            (16, 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            GRAY,
+            1,
+            cv2.LINE_AA,
+        )
     if recognized_text and time.monotonic() < transcript_visible_until:
         preview_text = recognized_text[-45:]
         if preview_text.endswith(" "):
@@ -451,6 +485,12 @@ def draw_camera_hud(frame, raw_pen_down):
     cv2.putText(frame, mode, (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.55, GREEN if state == "writing" else YELLOW, 1, cv2.LINE_AA)
     status = "WRITING - INDEX UP" if raw_pen_down else "MOVE - PINCH TO LIFT"
     cv2.putText(frame, f"{status}  ({len(pen_votes)}/{PEN_VOTE_FRAMES} vote samples)", (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.42, RED if pen_down else GRAY, 1, cv2.LINE_AA)
+    half_span = 0.5 / AMPLIFY
+    left = int(max(0.0, CAMERA_INPUT_CENTER_X - half_span) * width)
+    right = int(min(1.0, CAMERA_INPUT_CENTER_X + half_span) * width)
+    top = int(max(0.0, CAMERA_INPUT_CENTER_Y - half_span) * height)
+    bottom = int(min(1.0, CAMERA_INPUT_CENTER_Y + half_span) * height)
+    cv2.rectangle(frame, (left, top), (right, bottom), (80, 110, 80), 1, cv2.LINE_AA)
 
 
 def reset_stroke():
@@ -468,7 +508,7 @@ def begin_stroke():
 
 
 def draw_smooth_stroke(point):
-    """Use midpoint interpolation plus anti-aliased lines for fluid curves."""
+    """Draw a responsive anti-aliased stroke with rounded joins."""
     global prev_point, prev_midpoint
     if prev_point is None:
         prev_point = point
@@ -485,10 +525,13 @@ def draw_smooth_stroke(point):
         mark_canvas_changed()
         return
 
-    midpoint = ((prev_point[0] + point[0]) // 2, (prev_point[1] + point[1]) // 2)
-    cv2.line(canvas, prev_midpoint, midpoint, WHITE, STROKE_WIDTH, cv2.LINE_AA)
+    # Drawing directly to the current sample removes the half-segment delay of
+    # the old midpoint pass. A round endpoint keeps corners and slow curves
+    # smooth without making the cursor feel heavy.
+    cv2.line(canvas, prev_point, point, WHITE, STROKE_WIDTH, cv2.LINE_AA)
+    cv2.circle(canvas, point, STROKE_WIDTH // 2, WHITE, -1, cv2.LINE_AA)
     prev_point = point
-    prev_midpoint = midpoint
+    prev_midpoint = point
     mark_canvas_changed()
 
 
@@ -498,122 +541,182 @@ def clear_canvas():
     stroke_history.clear()
     reset_stroke()
     mark_canvas_changed()
+    if INPUT_BACKEND == "glove":
+        glove_reader.recenter()
 
 
-cap = cv2.VideoCapture(CAMERA_SOURCE)
-cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-if not cap.isOpened():
-    detector.close()
-    raise RuntimeError(f"Could not open camera source: {CAMERA_SOURCE!r}")
+def process_input(cursor, raw_pen_down, command, input_ready, start_requested=False, force_lift=False):
+    """Apply camera or glove input to the shared AirPen state machine."""
+    global pen_down, last_command, gesture_frames, command_latched, start_frames
+    global state, last_result, result_visible_until, transcript_visible_until
+    global recognized_text, filtered_cursor, last_cursor_at
+
+    previous_pen_down = pen_down
+    if not input_ready:
+        pen_votes.clear()
+        if pen_down:
+            reset_stroke()
+        pen_down = False
+        filtered_cursor = None
+        last_cursor_at = None
+        return
+
+    if force_lift or command != "none":
+        pen_votes.clear()
+        pen_down = False
+    else:
+        pen_votes.append(bool(raw_pen_down))
+        pen_down = (
+            len(pen_votes) == PEN_VOTE_FRAMES
+            and sum(pen_votes) >= (PEN_VOTE_FRAMES // 2 + 1)
+        )
+
+    if command == "none":
+        last_command, gesture_frames, command_latched = "none", 0, False
+    elif command == last_command:
+        gesture_frames += 1
+    else:
+        last_command, gesture_frames, command_latched = command, 1, False
+    required_hold = SPACE_HOLD_FRAMES if command == "space" else GESTURE_HOLD
+    command_triggered = gesture_frames >= required_hold and not command_latched
+    if command_triggered:
+        command_latched = True
+
+    if state == "ready":
+        if INPUT_BACKEND == "glove":
+            state = "writing"
+            glove_reader.recenter()
+            pen_votes.clear()
+            pen_down = False
+            print("Glove ready; writing mode enabled")
+        else:
+            start_frames = start_frames + 1 if start_requested else 0
+            if start_frames >= GESTURE_HOLD:
+                state = "writing"
+                start_frames = 0
+                pen_votes.clear()
+                pen_down = False
+                print("Writing mode enabled")
+        return
+
+    if state != "writing":
+        return
+
+    if command_triggered and command == "fist":
+        toggle_input_mode()
+    elif command_triggered and command == "peace":
+        if ink_count(canvas) >= 100:
+            start_recognition("word" if input_mode == "word" else "manual")
+        else:
+            show_final_transcript()
+    elif command_triggered and command == "palm":
+        clear_canvas()
+        print("Canvas cleared")
+    elif command_triggered and command == "space":
+        if input_mode == "word" and ink_count(canvas) >= 100:
+            last_result = "Use peace to read this word"
+            result_visible_until = time.monotonic() + 2.5
+        elif input_mode == "word" and recognized_text and not recognized_text.endswith(" "):
+            recognized_text += " "
+            last_result = "SPACE ADDED"
+            result_visible_until = time.monotonic() + 3.0
+            transcript_visible_until = result_visible_until
+            print("Space added")
+    elif pen_down and cursor is not None:
+        if not previous_pen_down:
+            begin_stroke()
+        draw_smooth_stroke(cursor)
+    elif previous_pen_down:
+        reset_stroke()
+
+
+cap = None
+if INPUT_BACKEND == "camera":
+    cap = cv2.VideoCapture(CAMERA_SOURCE)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if not cap.isOpened():
+        detector.close()
+        raise RuntimeError(f"Could not open camera source: {CAMERA_SOURCE!r}")
+else:
+    glove_reader.configure_canvas(CANVAS_WIDTH, CANVAS_HEIGHT)
+    glove_reader.start(port=GLOVE_SERIAL_PORT)
 
 frame_timestamp = 0
-print("AirPen started. Raise only your index finger for about 0.6 seconds to begin writing.")
+if INPUT_BACKEND == "glove":
+    print(f"AirPen glove mode started on {GLOVE_SERIAL_PORT}.")
+else:
+    print("AirPen started. Raise only your index finger for about 0.6 seconds to begin writing.")
 
 try:
     while True:
-        received, frame = cap.read()
-        if not received:
-            print("Camera frame could not be read; stopping.")
-            break
-
-        frame = cv2.flip(frame, 1)
+        if INPUT_BACKEND == "camera":
+            received, frame = cap.read()
+            if not received:
+                print("Camera frame could not be read; stopping.")
+                break
+            frame = cv2.flip(frame, 1)
+        else:
+            frame = np.zeros((270, 480, 3), dtype=np.uint8)
         height, width = frame.shape[:2]
         if canvas is None:
             canvas = np.zeros((CANVAS_HEIGHT, CANVAS_WIDTH, 3), dtype=np.uint8)
         if not windows_positioned:
-            cv2.namedWindow(CAMERA_WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+            if INPUT_BACKEND == "camera":
+                cv2.namedWindow(CAMERA_WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+                cv2.resizeWindow(CAMERA_WINDOW, 360, 270)
+                cv2.moveWindow(CAMERA_WINDOW, 20, 20)
             cv2.namedWindow(CANVAS_WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-            cv2.resizeWindow(CAMERA_WINDOW, 360, 270)
             cv2.resizeWindow(CANVAS_WINDOW, 1120, 630)
-            cv2.moveWindow(CAMERA_WINDOW, 20, 20)
-            cv2.moveWindow(CANVAS_WINDOW, 400, 20)
+            cv2.moveWindow(CANVAS_WINDOW, 400 if INPUT_BACKEND == "camera" else 20, 20)
             windows_positioned = True
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_timestamp = max(frame_timestamp + 1, time.monotonic_ns() // 1_000_000)
-        detector.detect_async(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), frame_timestamp)
+        if INPUT_BACKEND == "camera":
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_timestamp = max(frame_timestamp + 1, time.monotonic_ns() // 1_000_000)
+            detector.detect_async(
+                mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), frame_timestamp
+            )
 
         cursor = None
         raw_pen_down = False
-        landmarks = latest_landmarks
-        if landmarks:
+        landmarks = latest_landmarks if INPUT_BACKEND == "camera" else None
+        if INPUT_BACKEND == "glove":
+            glove_x, glove_y, raw_pen_down, glove_gesture, glove_ready = glove_reader.get_state()
+            cursor = (glove_x, glove_y) if glove_ready else None
+            command = "peace" if glove_gesture else "none"
+            process_input(
+                cursor,
+                raw_pen_down and not glove_gesture,
+                command,
+                glove_ready,
+                force_lift=glove_gesture,
+            )
+        elif landmarks:
             draw_hand(frame, landmarks, width, height)
             command = detect_command(landmarks)
-            previous_pen_down = pen_down
             moving = is_pinching(landmarks)
             raw_pen_down = is_writing_pose(landmarks) and command == "none"
-            if moving or command != "none":
-                # Pinch and commands must lift immediately; only starting a
-                # new index-only stroke uses the short stability vote.
-                pen_votes.clear()
-                pen_down = False
-            else:
-                pen_votes.append(raw_pen_down)
-                pen_down = len(pen_votes) == PEN_VOTE_FRAMES and sum(pen_votes) >= (PEN_VOTE_FRAMES // 2 + 1)
             raw_cursor = amplified_point(landmarks, canvas.shape[1], canvas.shape[0])
             cursor = stabilize_cursor(raw_cursor, pen_down)
-
-            if command == "none":
-                last_command, gesture_frames, command_latched = "none", 0, False
-            elif command == last_command:
-                gesture_frames += 1
-            else:
-                last_command, gesture_frames, command_latched = command, 1, False
-            required_hold = SPACE_HOLD_FRAMES if command == "space" else GESTURE_HOLD
-            command_triggered = gesture_frames >= required_hold and not command_latched
-            if command_triggered:
-                command_latched = True
-
-            if state == "ready":
-                start_frames = start_frames + 1 if is_start_gesture(landmarks) else 0
-                if start_frames >= GESTURE_HOLD:
-                    state = "writing"
-                    start_frames = 0
-                    pen_votes.clear()
-                    pen_down = False
-                    print("Writing mode enabled")
-            elif state == "writing":
-                if command_triggered and command == "fist":
-                    toggle_input_mode()
-                elif command_triggered and command == "peace":
-                    if ink_count(canvas) >= 100:
-                        start_recognition("word" if input_mode == "word" else "manual")
-                    else:
-                        show_final_transcript()
-                elif command_triggered and command == "palm":
-                    clear_canvas()
-                    print("Canvas cleared")
-                elif command_triggered and command == "space":
-                    if input_mode == "word" and ink_count(canvas) >= 100:
-                        last_result = "Use peace to read this word"
-                        result_visible_until = time.monotonic() + 2.5
-                    elif input_mode == "word" and recognized_text and not recognized_text.endswith(" "):
-                        recognized_text += " "
-                        last_result = "SPACE ADDED"
-                        result_visible_until = time.monotonic() + 3.0
-                        transcript_visible_until = result_visible_until
-                        print("Space added")
-                elif pen_down:
-                    if not previous_pen_down:
-                        begin_stroke()
-                    draw_smooth_stroke(cursor)
-                elif previous_pen_down:
-                    reset_stroke()
+            process_input(
+                cursor,
+                raw_pen_down,
+                command,
+                True,
+                start_requested=is_start_gesture(landmarks),
+                force_lift=moving,
+            )
         else:
-            pen_votes.clear()
-            if pen_down:
-                reset_stroke()
-            pen_down = False
-            filtered_cursor = None
-            last_cursor_at = None
+            process_input(None, False, "none", False)
 
         finish_recognition_if_ready()
 
-        camera_display = frame.copy()
-        draw_camera_hud(camera_display, raw_pen_down)
         canvas_display = canvas.copy()
         draw_canvas_overlay(canvas_display, cursor)
-        cv2.imshow(CAMERA_WINDOW, camera_display)
+        if INPUT_BACKEND == "camera":
+            camera_display = frame.copy()
+            draw_camera_hud(camera_display, raw_pen_down)
+            cv2.imshow(CAMERA_WINDOW, camera_display)
         cv2.imshow(CANVAS_WINDOW, canvas_display)
 
         key = cv2.waitKey(1) & 0xFF
@@ -635,8 +738,20 @@ try:
             cv2.setWindowProperty(CANVAS_WINDOW, cv2.WND_PROP_FULLSCREEN, target)
         elif key in (ord("m"), ord("M")):
             toggle_input_mode()
+        elif key in (ord("r"), ord("R")) and INPUT_BACKEND == "glove":
+            glove_reader.recenter()
+            reset_stroke()
+            pen_votes.clear()
+            pen_down = False
+            print("Glove cursor recentered")
+        if INPUT_BACKEND == "glove":
+            time.sleep(0.008)
 finally:
-    detector.close()
-    cap.release()
+    if detector is not None:
+        detector.close()
+    if cap is not None:
+        cap.release()
+    if INPUT_BACKEND == "glove":
+        glove_reader.stop()
     recognition_executor.shutdown(wait=False, cancel_futures=True)
     cv2.destroyAllWindows()

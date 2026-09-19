@@ -1,20 +1,30 @@
-# AirWrite desktop / laptop demo environment (Python 3.10 or 3.11 recommended).
-# Includes the local TrOCR server dependencies used for the classroom demo.
+# AirPen PC runtime dependencies, pinned to the versions tested on Windows 11
+# with Python 3.11.9 (64-bit). Install them into the project's own environment:
+#
+#   airwrite_env\Scripts\python.exe -m pip install -r requirements.txt
+#
+# Step-by-step setup for a new computer: RUNNING_ON_ANOTHER_PC.md
+# The local OCR mode needs the TrOCR packages below. The optional
+# OCR_BACKEND=huggingface mode needs requests, also listed below.
 
-# Camera, hand tracking, drawing, and HTTP client
-mediapipe>=0.10.14,<0.11
-numpy>=1.26,<3
-opencv-contrib-python>=4.8,<5
-Pillow>=10,<13
-pyserial>=3.5,<4
-requests>=2.32,<3
+# Hand tracking, camera and drawing.
+# MediaPipe needs the "contrib" build of OpenCV. Never install opencv-python
+# as well: two OpenCV packages in one environment break each other.
+mediapipe==0.10.35
+opencv-contrib-python==5.0.0.93
+numpy==2.4.6
+Pillow==12.2.0
 
-# Local TrOCR handwriting recognition
-torch>=2.2,<3
-transformers>=4.38,<5
-safetensors>=0.4,<1
+# Glove (USB serial port) and the optional cloud OCR client.
+pyserial==3.5
+requests==2.34.2
 
-# Temporary local OCR API (hf_endpoint/app.py)
-fastapi>=0.115,<1
-uvicorn[standard]>=0.30,<1
-python-multipart>=0.0.9,<1
+# Handwriting recognition (TrOCR) running on this computer.
+torch==2.12.1
+transformers==4.35.2
+tokenizers==0.15.0
+huggingface_hub==0.36.2
+safetensors==0.8.0
+sentencepiece==0.2.0
+
+# The cloud OCR server in hf_endpoint/ has its own requirements.txt.

@@ -4,6 +4,19 @@ This is the usable version of the code and steps extracted from
 `glove_laptop_guide.pdf`. The PDF's code listing has broken character spacing;
 use the source files in this repository instead of copying code from the PDF.
 
+## Important: which firmware is active
+
+The normal AirPen glove uses the MicroPython firmware in
+`glove_firmware/micropython/main.py`. It is copied to the ESP32 as
+`main.py`, starts automatically when the board receives power, and sends ten
+CSV values at 115200 baud. The Arduino sketches in this repository are
+diagnostic/legacy sketches; do not upload `glove_firmware.ino` for the normal
+AirPen presentation unless you intentionally want the Arduino data format.
+
+If the ESP32 already runs the glove, the friend’s laptop does not need
+Thonny. The upload steps are included below for recovering or replacing the
+firmware.
+
 ## Files
 
 - `glove_firmware/glove_firmware.ino` — complete ESP32 firmware
@@ -16,24 +29,41 @@ use the source files in this repository instead of copying code from the PDF.
 
 Disconnect USB power while changing wires.
 
-| Component | Component pin | ESP32 connection |
-|---|---|---|
-| BNO055 | VIN | 3.3V |
-| BNO055 | GND | GND |
-| BNO055 | SDA | GPIO 19 |
-| BNO055 | SCL | GPIO 21 |
-| Index flex sensor | one end | 3.3V |
-| Index flex sensor | other end | GPIO 34 and one end of 10 kΩ resistor |
-| Index resistor | other end | GND |
-| Middle flex sensor | one end | 3.3V |
-| Middle flex sensor | other end | GPIO 35 and one end of 10 kΩ resistor |
-| Middle resistor | other end | GND |
-| ESP32 | USB | Laptop USB port |
+| Component                                                      | Component pin | ESP32 connection                      |
+| -------------------------------------------------------------- | ------------- | ------------------------------------- |
+| BNO055                                                         | VIN           | 3.3V                                  |
+| BNO055                                                         | GND           | GND                                   |
+| BNO055                                                         | SDA           | GPIO 19                               |
+| BNO055                                                         | SCL           | GPIO 21                               |
+| Active pen flex sensor (currently sewn into the middle finger) | one end       | 3.3V                                  |
+| Active pen flex sensor                                         | other end     | GPIO 35 and one end of 10 kΩ resistor |
+| Active pen resistor                                            | other end     | GND                                   |
+| Unused second flex sensor                                      | one end       | 3.3V, only if physically installed    |
+| Unused second flex sensor                                      | other end     | GPIO 34 and one end of 10 kΩ resistor |
+| Unused second resistor                                         | other end     | GND                                   |
+| ESP32                                                          | USB           | Laptop USB port                       |
 
 Use the voltage printed on the actual BNO055 breakout board. The guide specifies
 3.3V, which is the safe choice for this wiring.
 
-## Arduino IDE
+## Recovering the MicroPython firmware (only if needed)
+
+Do this before the laptop presentation only if the board does not already
+send data. Install Thonny from <https://thonny.org/> and use a data-capable
+USB cable. In Thonny:
+
+1. Open **Tools > Options > Interpreter**.
+2. Select **MicroPython (ESP32)** and the ESP32’s COM port.
+3. Open `glove_firmware/micropython/main.py` from this project.
+4. Choose **File > Save as**, select **MicroPython device**, and save it as
+   exactly `main.py` in the device root.
+5. Press the Thonny stop/restart button, wait for `# BNO055 ready`, and check
+   that ten comma-separated values appear in the Shell about 50 times a
+   second.
+6. Close Thonny completely before starting AirPen. Thonny and AirPen cannot
+   open the same COM port at the same time.
+
+## Arduino IDE diagnostics (optional)
 
 1. Install Arduino IDE.
 2. Add this Boards Manager URL:
@@ -158,6 +188,7 @@ It prints a summary of the newest recording (pen blips, stuck pen, finger
 readings, hand speed) and saves a picture next to it: the drawing, plus a
 timeline of the finger sensor, pen state and hand speed. Gaps in the timeline
 mean the motion sensor dropped out; check its four wires.
+
 - Cursor is still noisy: lower smoothing to 0.55.
 - Cursor feels delayed: raise smoothing to 0.78.
 - Mirrored movement: `export GLOVE_HEADING_DIRECTION=-1`.

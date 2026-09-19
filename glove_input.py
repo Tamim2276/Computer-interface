@@ -10,10 +10,16 @@ import os
 from pathlib import Path
 import time
 
+from serial.tools import list_ports
+
 import glove_reader
 from input_common import InputFrame
 
-SERIAL_PORT = os.environ.get("GLOVE_SERIAL_PORT", "COM4")
+# "auto" finds the glove's USB port by itself, so it works on any computer
+# whatever COM number Windows gives it. Set GLOVE_SERIAL_PORT=COM5 (say) to force one.
+SERIAL_PORT = os.environ.get("GLOVE_SERIAL_PORT", "auto").strip() or "auto"
+# USB-to-serial chips used on ESP32 boards.
+GLOVE_CHIPS = ("CP210", "CH910", "CH34", "USB-SERIAL", "USB SERIAL", "UART")
 RECONNECT_SECONDS = 5.0
 # Sensitivity: how far the cursor moves per degree the hand turns. + and -
 # change it, and the value is kept in this file for the next run.
@@ -44,6 +50,18 @@ HELP_LINES = [
 ]
 
 
+def find_glove_port():
+    """Return the COM port the glove is plugged into, or None if there is none."""
+    if SERIAL_PORT.lower() != "auto":
+        return SERIAL_PORT
+    ports = list(list_ports.comports())
+    for port in ports:
+        described = f"{port.description} {port.manufacturer or ''}".upper()
+        if any(chip in described for chip in GLOVE_CHIPS):
+            return port.device
+    return ports[0].device if len(ports) == 1 else None
+
+
 class GloveInput:
     """AirPen input mode driven by the glove. See the module docstring."""
 
@@ -57,6 +75,7 @@ class GloveInput:
 
     def __init__(self):
         self._last_attempt = 0.0
+        self._port = None
         self._message = None
         self._step = None  # Index into CALIBRATION_STEPS while calibrating.
         self._step_ends = 0.0
@@ -70,8 +89,15 @@ class GloveInput:
             except ValueError:
                 pass  # A damaged file: keep the default.
         self._last_attempt = time.monotonic()
-        glove_reader.start(port=SERIAL_PORT)
-        print(f"Glove mode: reading {SERIAL_PORT}")
+        self._connect()
+
+    def _connect(self):
+        self._port = find_glove_port()
+        if self._port is None:
+            print("Glove mode: no glove USB port found yet - plug the glove in")
+            return
+        glove_reader.start(port=self._port)
+        print(f"Glove mode: reading {self._port}")
 
     def stop(self):
         if self._step is not None:
@@ -96,14 +122,15 @@ class GloveInput:
         now = time.monotonic()
         if not glove_reader.is_running() and now - self._last_attempt > RECONNECT_SECONDS:
             self._last_attempt = now
-            glove_reader.start(port=SERIAL_PORT)  # The cable was out; try again.
+            self._connect()  # The cable was out, or the port changed; look again.
 
         message, self._message = self._message, None
         banner = self._update_calibration(now)
         x, y, pen_down, _, ready = glove_reader.get_state()
         if not ready:
+            where = f"on {self._port}" if self._port else "(no glove USB port found)"
             return InputFrame(
-                status=f"Glove not connected on {SERIAL_PORT} - plug in its USB cable and close Thonny "
+                status=f"Glove not connected {where} - plug in its USB cable and close Thonny "
                        "(retrying every few seconds)",
                 banner=banner, message=message)
 

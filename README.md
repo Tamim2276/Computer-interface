@@ -17,7 +17,7 @@ AirPen is a real-time air-writing application. You write words in the air, one a
 
 1. Keep `hand_landmarker.task` beside `airwrite.py`.
 2. Set the camera: the phone's IP address lives in `camera_address.txt` (just the IP, such as `192.168.0.101`; a full URL or `0` for a webcam also works). When the address changes with the Wi-Fi network, press `I` in camera mode, type the new IP and press Enter: AirPen reconnects and saves it.
-3. Install the dependencies into a virtual environment.
+3. Install Python 3.11.9 (64-bit) and the dependencies into a virtual environment.
 
 ```bash
 python -m venv airwrite_env
@@ -32,6 +32,12 @@ python airwrite.py
 ```
 
 On Windows, double-click `run_camera.bat` or `run_glove.bat` to start in that mode.
+
+For a complete beginner-friendly setup, including the phone network, ESP32
+USB driver, glove firmware, model download, testing, and presentation-day
+checklist, follow `RUNNING_ON_ANOTHER_PC.md`. The normal glove firmware is
+`glove_firmware/micropython/main.py`; the Arduino sketches are optional
+diagnostic tools.
 
 On PowerShell, use:
 
@@ -66,29 +72,29 @@ The application sends the cropped handwriting image to `POST /ocr`; the endpoint
 
 Both modes:
 
-| Key | Action |
-| --- | --- |
-| `V` | Switch between camera and glove mode |
-| `Enter` | Submit: read the word on the canvas and add it to the text |
-| `Space` | Add a space after the last word (submitting a word still on the canvas first) |
-| `Backspace` | Remove the last stroke while writing; otherwise the last space or word |
-| `[` / `]` | Thinner / thicker pen (for new strokes) |
-| `C` / `X` | Clear the canvas / clear the text |
-| `U` | Undo the last stroke |
-| `H` | Hide or show the help box |
-| `F` | Toggle fullscreen |
-| `Esc` | Quit |
+| Key         | Action                                                                        |
+| ----------- | ----------------------------------------------------------------------------- |
+| `V`         | Switch between camera and glove mode                                          |
+| `Enter`     | Submit: read the word on the canvas and add it to the text                    |
+| `Space`     | Add a space after the last word (submitting a word still on the canvas first) |
+| `Backspace` | Remove the last stroke while writing; otherwise the last space or word        |
+| `[` / `]`   | Thinner / thicker pen (for new strokes)                                       |
+| `C` / `X`   | Clear the canvas / clear the text                                             |
+| `U`         | Undo the last stroke                                                          |
+| `H`         | Hide or show the help box                                                     |
+| `F`         | Toggle fullscreen                                                             |
+| `Esc`       | Quit                                                                          |
 
 Camera mode (hold each hand shape for half a second; a bar shows the progress):
 
-| Gesture | Action |
-| --- | --- |
-| Pinch thumb and index | Draw (open them to move without drawing) |
-| Peace sign | Submit word |
-| Thumbs up | Space (a word still on the canvas is submitted first, then the space follows) |
-| Three fingers up | Backspace |
-| Open palm | Clear the canvas |
-| `+` / `-` | Reach: how far the pen moves for a hand movement (0.5-3) |
+| Gesture               | Action                                                                        |
+| --------------------- | ----------------------------------------------------------------------------- |
+| Pinch thumb and index | Draw (open them to move without drawing)                                      |
+| Peace sign            | Submit word                                                                   |
+| Thumbs up             | Space (a word still on the canvas is submitted first, then the space follows) |
+| Three fingers up      | Backspace                                                                     |
+| Open palm             | Clear the canvas                                                              |
+| `+` / `-`             | Reach: how far the pen moves for a hand movement (0.5-3)                      |
 
 Glove mode: curl the flex finger to draw, and use the keys above for text. `K` calibrates the movement directions, `R` centres the cursor, and `+` / `-` change the sensitivity (remembered in `glove_sensitivity.txt`).
 
@@ -96,14 +102,14 @@ The first launch downloads Microsoft's `trocr-base-handwritten` model (about 1.3
 
 ## Project files
 
-| File | Purpose |
-| --- | --- |
-| `airwrite.py` | Shared app: canvas, strokes, recognition, text, help, mode switching |
-| `camera_input.py` | Camera mode: hand tracking, pinch, gestures, smoothing and its settings |
-| `glove_input.py` | Glove mode: pen, keys and the `K` direction calibration |
-| `glove_reader.py` | Reads the glove over USB and turns its sensors into cursor and pen |
-| `input_common.py` | What both modes report to the app, and the smoothing filter |
-| `glove_debug.py` | Turns a glove recording into a debugging report |
-| `glove_firmware/micropython/` | ESP32 glove firmware (MicroPython, uploaded with Thonny) |
-| `hand_landmarker.task` | MediaPipe hand-landmarker model |
-| `requirements.txt` | Python dependencies |
+| File                          | Purpose                                                                 |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| `airwrite.py`                 | Shared app: canvas, strokes, recognition, text, help, mode switching    |
+| `camera_input.py`             | Camera mode: hand tracking, pinch, gestures, smoothing and its settings |
+| `glove_input.py`              | Glove mode: pen, keys and the `K` direction calibration                 |
+| `glove_reader.py`             | Reads the glove over USB and turns its sensors into cursor and pen      |
+| `input_common.py`             | What both modes report to the app, and the smoothing filter             |
+| `glove_debug.py`              | Turns a glove recording into a debugging report                         |
+| `glove_firmware/micropython/` | ESP32 glove firmware (MicroPython, uploaded with Thonny)                |
+| `hand_landmarker.task`        | MediaPipe hand-landmarker model                                         |
+| `requirements.txt`            | Python dependencies                                                     |

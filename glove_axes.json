@@ -1,0 +1,13 @@
+{
+  "note": "Gyro mix for left/right (x) and up/down (y), measured 2026-09-19 11:08 with the K calibration in AirPen. Re-measure whenever the sensor moves.",
+  "x": [
+    0.3621,
+    0.9066,
+    0.4899
+  ],
+  "y": [
+    -0.7985,
+    -0.506,
+    0.5471
+  ]
+}

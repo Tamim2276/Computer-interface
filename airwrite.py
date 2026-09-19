@@ -72,7 +72,27 @@ MIN_INK_PIXELS = 2_500
 CANVAS_WIDTH = 1600
 CANVAS_HEIGHT = 900
 MAX_UNDO_STEPS = 30
+# A stroke this brief and this short is a pen blip (a finger twitch or sensor
+# flicker), not writing, and is erased when the pen lifts. Recorded glove
+# sessions showed 17 of 38 pen-downs were such blips; a deliberate dot held
+# for half a second is kept.
+MIN_STROKE_SECONDS = 0.25
+MIN_STROKE_PIXELS = 30
+# Glove only: straightening the finger moves the hand before the flex sensor
+# switches the pen up (recorded jerks run ~2x normal drawing speed), drawing a
+# hook at the end of strokes. The end of each stroke is trimmed by this much,
+# but never by more than this share of the stroke, so short strokes survive.
+STROKE_END_TRIM_SECONDS = 0.25
+STROKE_END_TRIM_SHARE = 0.30
 RESULT_DISPLAY_SECONDS = 6.0
+# Glove direction calibration (K key): (name, seconds, instruction). Gyro is
+# recorded during every step except "return", where the hand comes back.
+CALIBRATION_STEPS = [
+    ("still", 1.5, "Hold your hand still"),
+    ("right", 2.5, "Turn slowly to the RIGHT, then hold"),
+    ("return", 2.0, "Come back to the middle"),
+    ("down", 2.5, "Turn slowly DOWN, then hold"),
+]
 # Light adaptive smoothing: stable when holding still, near-direct while moving.
 CURSOR_DRAW_ALPHA = 0.60
 CURSOR_HOVER_ALPHA = 0.72
@@ -117,6 +137,9 @@ transcript_visible_until = 0.0
 latest_landmarks = None
 canvas = None
 stroke_history = []
+stroke_started_at = 0.0
+stroke_length = 0.0
+stroke_points = []  # (time, point) of the current stroke, for end trimming.
 pen_votes = deque(maxlen=PEN_VOTE_FRAMES)
 pen_down = False
 prev_point = None
@@ -135,6 +158,9 @@ cached_ink_box = None
 cached_ink_pixels = 0
 filtered_cursor = None
 last_cursor_at = None
+calibration_step = None  # Index into CALIBRATION_STEPS while calibrating.
+calibration_step_ends = 0.0
+calibration_recordings = {}
 
 
 def on_result(result, output_image, timestamp_ms):
@@ -441,9 +467,9 @@ def draw_canvas_overlay(image, cursor):
     if INPUT_BACKEND == "glove" and state == "ready":
         hint = f"Waiting for glove on {GLOVE_SERIAL_PORT} - move it in a figure-8"
     elif INPUT_BACKEND == "glove" and state == "recognizing":
-        hint = "TrOCR is reading - keep the middle finger straight"
+        hint = "TrOCR is reading - the canvas stays live"
     elif INPUT_BACKEND == "glove":
-        hint = "Glove: bend index to draw | bend middle to read | R: recenter | C: clear | U: undo"
+        hint = "Glove: curl finger to draw | Enter: read | +/-: letter size | K: calibrate | R: recenter | C: clear | U: undo"
     elif state == "ready":
         hint = "Index up: start writing"
     elif state == "recognizing":
@@ -454,13 +480,18 @@ def draw_canvas_overlay(image, cursor):
         hint = "Word Mode: index writes | Pinch moves | Peace: read word | Thumbs up: space | Fist: sentence mode"
     cv2.putText(image, hint, (16, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.48, YELLOW, 1, cv2.LINE_AA)
     if INPUT_BACKEND == "glove":
+        # Live sensor values, drawn just above the fill bar so they never
+        # overlap the transcript line at the top.
         flex_index, flex_middle = glove_reader.get_flex()
+        heading, pitch, roll = glove_reader.get_angles()
+        cursor_text = f"x {cursor[0]:4d} y {cursor[1]:4d}" if cursor is not None else "no cursor"
         cv2.putText(
             image,
-            f"Port: {GLOVE_SERIAL_PORT} | Flex index: {flex_index} | middle: {flex_middle}",
-            (16, 52),
+            f"heading {heading:6.1f}  pitch {pitch:6.1f}  roll {roll:6.1f} | "
+            f"flex {flex_index:4d} | pen {'DOWN' if pen_down else 'up'} | {cursor_text} | size {glove_reader.SCALE:.0f}",
+            (16, height - 60),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.5,
             GRAY,
             1,
             cv2.LINE_AA,
@@ -470,7 +501,15 @@ def draw_canvas_overlay(image, cursor):
         if preview_text.endswith(" "):
             preview_text += "[space]"
         cv2.putText(image, f"Text: {preview_text}", (16, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55, GREEN, 1, cv2.LINE_AA)
-    if time.monotonic() < result_visible_until:
+    if calibration_step is not None:
+        name, _, instruction = CALIBRATION_STEPS[calibration_step]
+        remaining = max(0.0, calibration_step_ends - time.monotonic())
+        banner = f"CALIBRATE {calibration_step + 1}/{len(CALIBRATION_STEPS)}: {instruction}  ({remaining:.1f}s)"
+        (text_width, text_height), _ = cv2.getTextSize(banner, cv2.FONT_HERSHEY_SIMPLEX, 1.05, 2)
+        x = max(20, (width - text_width) // 2)
+        cv2.rectangle(image, (x - 18, 72), (x + text_width + 18, 72 + text_height + 28), (20, 60, 90), -1)
+        cv2.putText(image, banner, (x, 72 + text_height + 8), cv2.FONT_HERSHEY_SIMPLEX, 1.05, YELLOW, 2, cv2.LINE_AA)
+    elif time.monotonic() < result_visible_until:
         banner = f"READ: {last_result}"
         (text_width, text_height), _ = cv2.getTextSize(banner, cv2.FONT_HERSHEY_SIMPLEX, 1.05, 2)
         x = max(20, (width - text_width) // 2)
@@ -501,15 +540,43 @@ def reset_stroke():
 
 def begin_stroke():
     """Store a reversible canvas snapshot once per stroke for U/undo."""
+    global stroke_started_at, stroke_length
     stroke_history.append(canvas.copy())
     if len(stroke_history) > MAX_UNDO_STEPS:
         stroke_history.pop(0)
+    stroke_started_at = time.monotonic()
+    stroke_length = 0.0
+    stroke_points.clear()
+    reset_stroke()
+
+
+def end_stroke():
+    """Finish a stroke: erase it if it was only a pen blip, else trim its end."""
+    global canvas
+    now = time.monotonic()
+    blip = (now - stroke_started_at < MIN_STROKE_SECONDS
+            and stroke_length < MIN_STROKE_PIXELS)
+    if blip and stroke_history:
+        canvas = stroke_history.pop()
+        mark_canvas_changed()
+    elif INPUT_BACKEND == "glove" and stroke_history and stroke_points:
+        # Redraw the stroke from its starting snapshot without the final
+        # moment, removing the hook made while the finger straightened.
+        trim = min(STROKE_END_TRIM_SECONDS, STROKE_END_TRIM_SHARE * (now - stroke_started_at))
+        cutoff = now - trim
+        kept = [point for moment, point in stroke_points if moment <= cutoff]
+        canvas = stroke_history[-1].copy()
+        reset_stroke()
+        for point in kept:
+            draw_smooth_stroke(point)
+        mark_canvas_changed()
+    stroke_points.clear()
     reset_stroke()
 
 
 def draw_smooth_stroke(point):
     """Draw a responsive anti-aliased stroke with rounded joins."""
-    global prev_point, prev_midpoint
+    global prev_point, prev_midpoint, stroke_length
     if prev_point is None:
         prev_point = point
         prev_midpoint = point
@@ -530,6 +597,7 @@ def draw_smooth_stroke(point):
     # smooth without making the cursor feel heavy.
     cv2.line(canvas, prev_point, point, WHITE, STROKE_WIDTH, cv2.LINE_AA)
     cv2.circle(canvas, point, STROKE_WIDTH // 2, WHITE, -1, cv2.LINE_AA)
+    stroke_length += float(np.hypot(point[0] - prev_point[0], point[1] - prev_point[1]))
     prev_point = point
     prev_midpoint = point
     mark_canvas_changed()
@@ -543,6 +611,51 @@ def clear_canvas():
     mark_canvas_changed()
     if INPUT_BACKEND == "glove":
         glove_reader.recenter()
+
+
+def start_calibration():
+    """Begin the guided K calibration of the glove's movement directions."""
+    global calibration_step, calibration_step_ends
+    calibration_recordings.clear()
+    calibration_step = 0
+    calibration_step_ends = time.monotonic() + CALIBRATION_STEPS[0][1]
+    glove_reader.start_capture()
+    print("Calibrating glove directions")
+
+
+def update_calibration():
+    """Move through the calibration steps, then learn and apply the directions."""
+    global calibration_step, calibration_step_ends, last_result, result_visible_until
+    if calibration_step is None or time.monotonic() < calibration_step_ends:
+        return
+    name = CALIBRATION_STEPS[calibration_step][0]
+    samples = glove_reader.take_capture()
+    if name != "return":
+        calibration_recordings[name] = samples
+
+    calibration_step += 1
+    if calibration_step < len(CALIBRATION_STEPS):
+        next_name, seconds, _ = CALIBRATION_STEPS[calibration_step]
+        calibration_step_ends = time.monotonic() + seconds
+        if next_name != "return":
+            glove_reader.start_capture()
+        return
+
+    calibration_step = None
+    try:
+        angle = glove_reader.calibrate_axes(
+            calibration_recordings["still"],
+            calibration_recordings["right"],
+            calibration_recordings["down"],
+        )
+        last_result = "Directions calibrated"
+        print(f"Glove directions calibrated ({angle:.0f} degrees apart); saved to glove_axes.json")
+    except ValueError as error:
+        last_result = str(error)
+        print(f"Calibration failed: {error}")
+    result_visible_until = time.monotonic() + 3.0
+    glove_reader.recenter()
+    reset_stroke()
 
 
 def process_input(cursor, raw_pen_down, command, input_ready, start_requested=False, force_lift=False):
@@ -625,9 +738,10 @@ def process_input(cursor, raw_pen_down, command, input_ready, start_requested=Fa
     elif pen_down and cursor is not None:
         if not previous_pen_down:
             begin_stroke()
+        stroke_points.append((time.monotonic(), cursor))
         draw_smooth_stroke(cursor)
     elif previous_pen_down:
-        reset_stroke()
+        end_stroke()
 
 
 cap = None
@@ -684,13 +798,15 @@ try:
             glove_x, glove_y, raw_pen_down, glove_gesture, glove_ready = glove_reader.get_state()
             cursor = (glove_x, glove_y) if glove_ready else None
             command = "peace" if glove_gesture else "none"
+            calibrating = calibration_step is not None
             process_input(
                 cursor,
-                raw_pen_down and not glove_gesture,
-                command,
+                raw_pen_down and not glove_gesture and not calibrating,
+                "none" if calibrating else command,
                 glove_ready,
-                force_lift=glove_gesture,
+                force_lift=glove_gesture or calibrating,
             )
+            update_calibration()
         elif landmarks:
             draw_hand(frame, landmarks, width, height)
             command = detect_command(landmarks)
@@ -736,8 +852,21 @@ try:
             current = cv2.getWindowProperty(CANVAS_WINDOW, cv2.WND_PROP_FULLSCREEN)
             target = cv2.WINDOW_NORMAL if current == cv2.WINDOW_FULLSCREEN else cv2.WINDOW_FULLSCREEN
             cv2.setWindowProperty(CANVAS_WINDOW, cv2.WND_PROP_FULLSCREEN, target)
+        elif key == 13 and state == "writing":  # Enter
+            if ink_count(canvas) >= 100:
+                start_recognition("word" if input_mode == "word" else "manual")
+            else:
+                show_final_transcript()
         elif key in (ord("m"), ord("M")):
             toggle_input_mode()
+        elif key in (ord("+"), ord("="), ord("-")) and INPUT_BACKEND == "glove":
+            factor = 1.15 if key != ord("-") else 1 / 1.15
+            new_scale = glove_reader.set_scale(glove_reader.SCALE * factor)
+            last_result = f"Letter size {new_scale:.0f}"
+            result_visible_until = time.monotonic() + 1.5
+            print(f"Glove letter size set to {new_scale:.0f} (GLOVE_SCALE)")
+        elif key in (ord("k"), ord("K")) and INPUT_BACKEND == "glove" and calibration_step is None:
+            start_calibration()
         elif key in (ord("r"), ord("R")) and INPUT_BACKEND == "glove":
             glove_reader.recenter()
             reset_stroke()

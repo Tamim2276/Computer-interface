@@ -20,8 +20,8 @@ Disconnect USB power while changing wires.
 |---|---|---|
 | BNO055 | VIN | 3.3V |
 | BNO055 | GND | GND |
-| BNO055 | SDA | GPIO 21 |
-| BNO055 | SCL | GPIO 22 |
+| BNO055 | SDA | GPIO 19 |
+| BNO055 | SCL | GPIO 21 |
 | Index flex sensor | one end | 3.3V |
 | Index flex sensor | other end | GPIO 34 and one end of 10 kΩ resistor |
 | Index resistor | other end | GND |
@@ -50,6 +50,8 @@ board and reconnect it.
 
 1. Upload `bno055_test.ino`. At 115200 baud, confirm `BNO055 OK` and changing
    heading/pitch/roll values.
+   This project's sensor was detected at I2C address `0x29`; the complete
+   Arduino firmware is configured to use that address.
 2. Upload `flex_test.ino`. Record each sensor value with the finger straight and
    bent comfortably.
 3. In `glove_firmware.ino`, set each threshold halfway between its straight and
@@ -102,12 +104,19 @@ export OCR_BACKEND=local
 python airwrite.py
 ```
 
+Or double-click `run_glove.bat`, which sets these and starts AirPen.
+
 Controls:
 
-- Move the glove: move the cursor
-- Bend index finger: draw
-- Straighten index finger: reposition without drawing
-- Bend and hold middle finger: recognize current word
+- Rotate the finger or hand: move the cursor (like an air mouse)
+- Curl the flex-sensor finger: draw
+- Straighten it: reposition without drawing
+- `Enter`: recognize the current word
+- `+` / `-`: bigger / smaller letters for the same hand movement (shown as
+  "size" at the bottom of the canvas; start AirPen with `GLOVE_SCALE` set to
+  a size you like to keep it)
+- `K`: calibrate the movement directions (after putting the glove on, or
+  whenever moving in one direction comes out diagonal)
 - `C`: clear canvas
 - `U`: undo last stroke
 - `R`: recenter the glove cursor
@@ -120,16 +129,36 @@ Controls:
 Set these before launching AirPen:
 
 ```bash
-export GLOVE_SCALE=16.0
-export GLOVE_DEAD_ZONE=0.12
-export GLOVE_SMOOTHING=0.68
+export GLOVE_SCALE=30.0
+export GLOVE_DEAD_ZONE=0.0
+export GLOVE_SMOOTHING=0.55
 ```
 
-- Letters too small or movement needs too much wrist travel: raise scale to 20 or 24.
-- Cursor reaches an edge too fast: lower scale to 6 or 8.
-- Cursor drifts: raise dead zone gradually to 0.18, 0.25, or 0.35.
-- Small movements are ignored: lower dead zone to 0.08.
+- Letters too small or movement needs too much wrist travel: raise scale to 36 or 40.
+- Cursor reaches an edge too fast: lower scale to 20 or 24.
+- Cursor drifts while the hand is still: raise dead zone slightly, to 0.02 or 0.04.
+  Larger values discard the slow movements that form letters.
+- Pen goes down too easily or not at all: the PC decides the pen from the
+  raw finger reading. It goes down below `GLOVE_PEN_DOWN_BELOW` (45) and lifts
+  after rising `GLOVE_PEN_RELEASE_RISE` (25) above the curl, or above
+  `GLOVE_PEN_UP_ABOVE` (70). After fitting a new flex sensor, measure its
+  straight and curled readings with `glove_firmware/micropython/flex_pins_test.py`
+  and set `GLOVE_PEN_DOWN_BELOW` between them.
+
+## Debugging
+
+`run_glove.bat` records every glove sample to `glove_logs/` (`GLOVE_LOG=1`).
+After quitting AirPen, run:
+
+```bash
+airwrite_env/Scripts/python.exe glove_debug.py
+```
+
+It prints a summary of the newest recording (pen blips, stuck pen, finger
+readings, hand speed) and saves a picture next to it: the drawing, plus a
+timeline of the finger sensor, pen state and hand speed. Gaps in the timeline
+mean the motion sensor dropped out; check its four wires.
 - Cursor is still noisy: lower smoothing to 0.55.
 - Cursor feels delayed: raise smoothing to 0.78.
-- Mirrored movement: change the sign of `heading_change` in `glove_reader.py`.
-- Upside-down movement: change the sign of `pitch_change` in `glove_reader.py`.
+- Mirrored movement: `export GLOVE_HEADING_DIRECTION=-1`.
+- Upside-down movement: `export GLOVE_PITCH_DIRECTION=-1`.

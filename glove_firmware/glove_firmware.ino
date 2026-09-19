@@ -4,10 +4,11 @@
 
 #define FLEX_INDEX_PIN 34
 #define FLEX_MIDDLE_PIN 35
-#define SDA_PIN 21
-#define SCL_PIN 22
+#define SDA_PIN 19
+#define SCL_PIN 21
 
-Adafruit_BNO055 bno(55, 0x28);
+// The connected module was detected at address 0x29.
+Adafruit_BNO055 bno(55, 0x29);
 
 // Calibrate these using the Serial Monitor. With the guide's wiring
 // (flex sensor to 3.3V and 10k resistor to GND), bending usually lowers ADC.
@@ -30,7 +31,7 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN);
   if (!bno.begin()) {
     Serial.println("# ERROR: BNO055 not found");
-    Serial.println("# Check 3.3V, GND, SDA GPIO21, and SCL GPIO22");
+    Serial.println("# Check 3.3V, GND, SDA GPIO19, and SCL GPIO21");
     while (true) delay(1000);
   }
 
@@ -72,4 +73,3 @@ void loop() {
   Serial.print(penDown ? 1 : 0); Serial.print(',');
   Serial.println(recognizeGesture ? 1 : 0);
 }
-

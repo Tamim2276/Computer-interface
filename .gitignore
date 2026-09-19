@@ -34,3 +34,4 @@ Thumbs.db
 
 # Glove debug recordings (GLOVE_LOG=1)
 glove_logs/
+camera_logs/

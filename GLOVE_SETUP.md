@@ -112,9 +112,9 @@ Controls:
 - Curl the flex-sensor finger: draw
 - Straighten it: reposition without drawing
 - `Enter`: recognize the current word
-- `+` / `-`: bigger / smaller letters for the same hand movement (shown as
-  "size" at the bottom of the canvas; start AirPen with `GLOVE_SCALE` set to
-  a size you like to keep it)
+- `+` / `-`: more / less sensitive: how far the cursor moves for a hand turn
+  (shown as "sensitivity" at the bottom of the canvas and remembered in
+  `glove_sensitivity.txt`)
 - `K`: calibrate the movement directions (after putting the glove on, or
   whenever moving in one direction comes out diagonal)
 - `C`: clear canvas

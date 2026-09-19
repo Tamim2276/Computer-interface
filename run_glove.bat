@@ -7,5 +7,7 @@ set GLOVE_SERIAL_PORT=COM4
 set OCR_BACKEND=local
 rem Record every glove sample to glove_logs\ for debugging.
 set GLOVE_LOG=1
+rem Record every camera frame to camera_logs\ for debugging.
+set AIRPEN_LOG=1
 airwrite_env\Scripts\python.exe airwrite.py
 pause

@@ -295,7 +295,7 @@ def _reader(port, baud):
         connection = serial.Serial(port, baud, timeout=1.0)
     except serial.SerialException as error:
         print(f"[glove] cannot open {port}: {error}")
-        print("[glove] close Arduino Serial Monitor, check the port, and restart AirPen")
+        print("[glove] close Thonny and check the USB cable; AirPen keeps retrying")
         _running = False
         return
 
@@ -363,10 +363,12 @@ def _reader(port, baud):
 
 
 def start(port=None, baud=BAUD_RATE):
-    """Start the background reader. Call once before the UI loop."""
+    """Start the background reader. Safe to call again after it has stopped."""
     global _running, _thread
     if _running:
         return
+    if _thread is not None and _thread.is_alive():
+        _thread.join(timeout=2.0)  # Let a stopping reader release the port first.
     _running = True
     _thread = threading.Thread(
         target=_reader,
@@ -378,8 +380,16 @@ def start(port=None, baud=BAUD_RATE):
 
 
 def stop():
+    """Stop the background reader and wait for it to close the serial port."""
     global _running
     _running = False
+    if _thread is not None and _thread.is_alive() and _thread is not threading.current_thread():
+        _thread.join(timeout=2.0)
+
+
+def is_running():
+    """True while the reader has the port open or is opening it."""
+    return _running
 
 
 def get_state():
@@ -403,7 +413,7 @@ def get_flex():
 
 
 def set_scale(pixels_per_degree):
-    """Change the writing size live (pixels of cursor travel per degree turned)."""
+    """Change the sensitivity live (pixels of cursor travel per degree turned)."""
     global SCALE
     SCALE = max(5.0, min(120.0, float(pixels_per_degree)))
     return SCALE

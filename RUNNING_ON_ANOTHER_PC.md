@@ -90,10 +90,17 @@ your newest version.
 
 These save a lot of time and make you independent of the venue's internet.
 
-1. **The handwriting model (about 1.3 GB).** Copy the Hugging Face cache
-   folder **`models--microsoft--trocr-base-handwritten`** from the computer
-   where AirPen already works. If you do not know its location, use the
-   model-check command in Step 2.6 and let the friend’s laptop download it.
+1. **The handwriting model (about 1.3 GB).** On the computer where AirPen
+   already works, find where it is stored by typing this in the project folder:
+
+   ```bat
+   airwrite_env\Scripts\python.exe -c "from huggingface_hub.constants import HF_HUB_CACHE; print(HF_HUB_CACHE)"
+   ```
+
+   Open that folder (Windows key + R, paste the path, Enter) and copy the
+   folder **`models--microsoft--trocr-base-handwritten`** to the USB stick.
+   You can skip this and let the friend's laptop download it in Step 2.6,
+   but that needs a good internet connection on the day.
 2. **The glove's USB driver.** Press **Windows key + R**, type
    `%USERPROFILE%\Desktop` and press **Enter**. Copy the folder
    **`cp210x_driver`** to the USB stick.
